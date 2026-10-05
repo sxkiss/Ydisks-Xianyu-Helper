@@ -45,6 +45,8 @@ func TestGuardCredentialReplacement_AllowsSafeWrites(t *testing.T) {
 	}{
 		{"带新x5sec的正常增量", original, "unb=331540304; cookie2=xyz; _m_h5_tk=t_1; skt=abc; x5sec=new"},
 		{"原凭证本就无登录态", "cna=abc", "cna=abc; tfstk=def"},
+		// token 响应未携带 Cookie 时不应被判定为破坏登录态。
+		{"空值表示无写入", original, ""},
 		{"刷新了token值", original, "unb=331540304; cookie2=xyz; _m_h5_tk=t_2; skt=abc"},
 	}
 	for _, c := range cases {

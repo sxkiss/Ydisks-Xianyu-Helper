@@ -16,6 +16,8 @@ const accountFixture = {
   runtime_state: 'online',
   runtime_message: '',
   ai_enabled: true,
+  general_enabled: false,
+  general_prompt_enabled: false,
   auto_rate_enabled: false,
   auto_polish_enabled: false,
   auto_confirm: false,
@@ -25,6 +27,8 @@ const accountFixture = {
 // aiSettingsFixture 是 AI 设置弹窗测试使用的编辑草稿。
 const aiSettingsFixture: AIReplySettings = {
   ai_enabled: false,
+  general_enabled: false,
+  general_prompt_enabled: false,
   auto_adjust_price_enabled: false,
   max_discount_percent: 10,
   max_discount_amount: 100,

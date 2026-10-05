@@ -227,6 +227,7 @@ func (r *SettingsRepository) UpsertAIReply(ctx context.Context, cookieID string,
 	}
 	return r.store.AIReply.UpsertSettings(ctx, cookieID, db.AIReplySettings{
 		CookieID: cookieID, AIEnabled: settings.AIEnabled, AutoAdjustPriceEnabled: settings.AutoAdjustPriceEnabled,
+		GeneralEnabled: settings.GeneralEnabled, GeneralPromptEnabled: settings.GeneralPromptEnabled,
 		MaxDiscountPercent: settings.MaxDiscountPercent, MaxDiscountAmount: settings.MaxDiscountAmount,
 		MaxBargainRounds: settings.MaxBargainRounds, CustomPrompts: settings.CustomPrompts,
 	})
@@ -268,6 +269,7 @@ func (r *SettingsRepository) validateAudit() error {
 func aiReplyModel(record db.AIReplySettings) settingsapp.AIReplySettings {
 	return settingsapp.AIReplySettings{
 		CookieID: record.CookieID, AIEnabled: record.AIEnabled, AutoAdjustPriceEnabled: record.AutoAdjustPriceEnabled,
+		GeneralEnabled: record.GeneralEnabled, GeneralPromptEnabled: record.GeneralPromptEnabled,
 		MaxDiscountPercent: record.MaxDiscountPercent, MaxDiscountAmount: record.MaxDiscountAmount,
 		MaxBargainRounds: record.MaxBargainRounds, CustomPrompts: record.CustomPrompts,
 	}

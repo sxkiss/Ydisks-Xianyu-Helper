@@ -123,7 +123,7 @@ func (c *credentialCoordinator) refreshTokenWithMinGap(ctx context.Context, _ bo
 		// persistErr 用于本次流程后续判断的persistErr
 		var persistErr error
 		// 护栏：token 响应的 Cookie 不得破坏既有登录态；否则视为失败并保留原凭证。
-		if res != nil {
+		if res != nil && strings.TrimSpace(res.UpdatedCookies) != "" && res.UpdatedCookies != cookieStr {
 			if guardErr := cookierefresh.GuardCredentialReplacement(cookieStr, res.UpdatedCookies); guardErr != nil {
 				a.setLastTokenStatus(tokenRefreshFailedAPI)
 				a.clearCurrentToken()

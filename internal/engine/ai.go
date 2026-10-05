@@ -57,10 +57,12 @@ func (a *AIReplierImpl) Reply(ctx context.Context, m ChatMessage) (*ReplyResult,
 	if err != nil || cfg == nil || !cfg.AIEnabled {
 		return nil, nil // 未启用 AI
 	}
-	// AI 设置面向砍价场景。普通未命中消息继续交给默认回复，避免 AI
-	// 抢答问候、售后等与砍价无关的消息。
+	// 非砍价消息按账号开关决定：未开启通用客服时保持原语义（交给关键词/默认回复）。
 	if !bargainMessageRe.MatchString(strings.ToLower(m.Text)) {
-		return nil, nil
+		if !cfg.GeneralEnabled {
+			return nil, nil
+		}
+		return a.replyGeneral(ctx, cfg, m)
 	}
 	// aiCfg、err 用于本次流程后续判断的人工智能Cfg、err
 	aiCfg, err := a.globalAIConfig(ctx)
@@ -176,6 +178,87 @@ func (a *AIReplierImpl) Reply(ctx context.Context, m ChatMessage) (*ReplyResult,
 		}
 	}
 	return &ReplyResult{Text: reply, AutoPriceQuote: quote}, nil
+}
+
+// replyGeneral 处理非砍价的普通买家消息（通用客服）。
+// 接入的模型/智能体自带人设与知识，因此本路径不注入 system 提示词，
+// 只转发对话历史与当前消息；并且永不产生改价提案，避免普通咨询触发真实降价。
+func (a *AIReplierImpl) replyGeneral(ctx context.Context, cfg *db.AIReplySettings, m ChatMessage) (*ReplyResult, error) {
+	// aiCfg 是全局 OpenAI 兼容端点配置（地址/密钥/模型）。
+	aiCfg, cfgErr := a.globalAIConfig(ctx)
+	if cfgErr != nil {
+		return nil, fmt.Errorf("读取全局 AI 配置失败: %w", cfgErr)
+	}
+	if aiCfg == nil {
+		return nil, nil
+	}
+	if aiCfg.APIKey == "" {
+		a.logger.Warn("通用 AI 已启用但未配置 APIKey")
+		return nil, nil
+	}
+	// history 是同一会话/商品下的历史往返，供模型延续上下文。
+	history, _, _, err := a.conversationContext(ctx, m)
+	if err != nil {
+		return nil, fmt.Errorf("读取 AI 对话历史失败: %w", err)
+	}
+	// clientCfg 保存 OpenAI 兼容客户端配置。
+	clientCfg := openai.DefaultConfig(aiCfg.APIKey)
+	if aiCfg.BaseURL != "" {
+		clientCfg.BaseURL = aiCfg.BaseURL
+	}
+	clientCfg.HTTPClient, err = newAIHTTPClient(clientCfg.BaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("AI API 地址无效: %w", err)
+	}
+	client := openai.NewClientWithConfig(clientCfg)
+
+	// messages 默认只包含对话历史与当前买家消息。仅当账号显式开启
+	// general_prompt_enabled 时才注入自定义提示词；接入自带人设的智能体时保持关闭。
+	messages := make([]openai.ChatCompletionMessage, 0, len(history)+2)
+	if cfg != nil && cfg.GeneralPromptEnabled {
+		if prompt := strings.TrimSpace(cfg.CustomPrompts); prompt != "" {
+			messages = append(messages, openai.ChatCompletionMessage{
+				Role:    openai.ChatMessageRoleSystem,
+				Content: prompt,
+			})
+		}
+	}
+	for _, message := range history {
+		role := openai.ChatMessageRoleUser
+		if message.Role == "assistant" {
+			role = openai.ChatMessageRoleAssistant
+		}
+		messages = append(messages, openai.ChatCompletionMessage{Role: role, Content: truncateAIContent(message.Content)})
+	}
+	messages = append(messages, openai.ChatCompletionMessage{Role: openai.ChatMessageRoleUser, Content: m.Text})
+
+	aiCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	resp, err := client.CreateChatCompletion(aiCtx, openai.ChatCompletionRequest{
+		Model:       aiCfg.Model,
+		Messages:    messages,
+		Temperature: 0.7,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("AI 调用失败: %w", err)
+	}
+	if len(resp.Choices) == 0 {
+		return nil, nil
+	}
+	// 通用路径同样剥离可执行报价标记，确保不会进入自动改价链路。
+	reply, _, _ := extractExecutableOffer(strings.TrimSpace(resp.Choices[0].Message.Content))
+	if reply == "" {
+		return nil, nil
+	}
+	if m.ChatID != "" && m.ItemID != "" {
+		if err := a.store.AIReply.AddConversationExchange(ctx, a.cookieID, m.ChatID, m.SenderUserID, m.ItemID,
+			db.AIConversationMessage{Role: "user", Content: m.Text, Intent: "general"},
+			db.AIConversationMessage{Role: "assistant", Content: reply, Intent: "reply"},
+		); err != nil {
+			return nil, fmt.Errorf("保存 AI 对话失败: %w", err)
+		}
+	}
+	return &ReplyResult{Text: reply}, nil
 }
 
 // conversationContext 封装conversation上下文业务协调。

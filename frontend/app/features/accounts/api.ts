@@ -343,6 +343,8 @@ export const updateAccountAISettings = async (cookieId: string, settings: Partia
   // payload 请求载荷，用于当前 API 处理流程。
   const payload = {
     ai_enabled: settings.ai_enabled ?? false,
+    general_enabled: settings.general_enabled ?? false,
+    general_prompt_enabled: settings.general_prompt_enabled ?? false,
     auto_adjust_price_enabled: settings.auto_adjust_price_enabled ?? false,
     max_discount_percent: settings.max_discount_percent ?? 10,
     max_discount_amount: settings.max_discount_amount ?? 100,

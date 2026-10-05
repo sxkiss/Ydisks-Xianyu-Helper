@@ -44,6 +44,10 @@ export interface SystemSettings {
 export interface AIReplySettings {
   /** 是否启用账号 AI 回复。 */
   ai_enabled: boolean;
+  /** 是否把非砍价的普通买家消息交给 AI 处理（通用客服）。 */
+  general_enabled: boolean;
+  /** 通用客服是否注入自定义提示词；接入自带人设的智能体时保持关闭。 */
+  general_prompt_enabled: boolean;
   /** 最大折扣比例。 */
   max_discount_percent: number;
   /** 最大折扣金额。 */

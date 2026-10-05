@@ -686,6 +686,10 @@ var ErrCredentialRegression = errors.New("新 Cookie 会破坏既有登录态")
 // 原 Cookie 仍带完整登录态而新 Cookie 不带时返回错误，避免风控/续期写入
 // 只剩 cna、tfstk 之类的临时 Cookie 罐，使账号永久掉线。
 func GuardCredentialReplacement(original, newCookieString string) error {
+	if strings.TrimSpace(newCookieString) == "" {
+		// 空值表示本次没有 Cookie 写入，不构成覆盖。
+		return nil
+	}
 	if HasLoginIdentity(newCookieString) {
 		return nil
 	}

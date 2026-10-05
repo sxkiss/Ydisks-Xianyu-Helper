@@ -13,6 +13,10 @@ type aiReplySettingsResponse struct {
 	CookieID string `json:"cookie_id,omitempty"`
 	// AIEnabled 表示账号 AI 回复是否启用。
 	AIEnabled bool `json:"ai_enabled"`
+	// GeneralEnabled 表示普通买家消息是否交给 AI 处理（通用客服）。
+	GeneralEnabled bool `json:"general_enabled"`
+	// GeneralPromptEnabled 表示通用客服是否注入自定义提示词。
+	GeneralPromptEnabled bool `json:"general_prompt_enabled"`
 	// AutoAdjustPriceEnabled 表示有效 AI 报价是否会触发真实订单改价。
 	AutoAdjustPriceEnabled bool `json:"auto_adjust_price_enabled"`
 	// MaxDiscountPercent 是允许的最大折扣比例。

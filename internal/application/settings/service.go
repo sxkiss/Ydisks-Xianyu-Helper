@@ -38,6 +38,10 @@ type AIReplySettings struct {
 	CookieID string
 	// AIEnabled 表示账号 AI 回复是否启用。
 	AIEnabled bool
+	// GeneralEnabled 表示非砍价的普通买家消息是否交给 AI 处理（通用客服）。
+	GeneralEnabled bool
+	// GeneralPromptEnabled 表示通用客服是否注入自定义提示词。
+	GeneralPromptEnabled bool
 	// AutoAdjustPriceEnabled 表示是否把有效 AI 报价自动应用到买家新拍订单。
 	AutoAdjustPriceEnabled bool
 	// MaxDiscountPercent 是允许的最大折扣比例。

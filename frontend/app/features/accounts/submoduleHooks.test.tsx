@@ -61,7 +61,7 @@ const accountFixture = { id: 'account-1', enabled: true, value: 'old-cookie', re
 // editFormFixture 是账号编辑弹窗的初始表单。
 const editFormFixture: AccountEditForm = { remark: '新备注', cookie: 'new-cookie', auto_confirm: true, auto_consign: false, auto_bargain: true, pause_duration: 60, username: 'user@example.com', login_password: 'new-password', show_browser: true, showLoginPassword: false, clear_password: false };
 // aiFixture 是账号 AI 设置的服务端配置。
-const aiFixture: AIReplySettings = { ai_enabled: true, auto_adjust_price_enabled: true, max_discount_percent: 20, max_discount_amount: 50, max_bargain_rounds: 2, custom_prompts: '请礼貌回复' };
+const aiFixture: AIReplySettings = { ai_enabled: true, general_enabled: true, general_prompt_enabled: true, auto_adjust_price_enabled: true, max_discount_percent: 20, max_discount_amount: 50, max_bargain_rounds: 2, custom_prompts: '请礼貌回复' };
 
 describe('useAccountSubmodules', /* 当前回调处理账号编辑、AI、通知绑定和密码登录。 */ () => {
   beforeEach(/* 当前回调重置账号子模块 API 替身。 */ () => {
@@ -383,12 +383,12 @@ describe('useAccountSubmodules', /* 当前回调处理账号编辑、AI、通知
     );
     expect(hook.result.current.selectedChannelIds).toEqual([]);
 
-    accountAIMock.mockResolvedValueOnce({ ai_enabled: undefined, max_discount_percent: undefined, max_discount_amount: undefined, max_bargain_rounds: undefined, custom_prompts: undefined } as never);
+    accountAIMock.mockResolvedValueOnce({ ai_enabled: undefined, general_enabled: undefined, general_prompt_enabled: undefined, max_discount_percent: undefined, max_discount_amount: undefined, max_bargain_rounds: undefined, custom_prompts: undefined } as never);
     await act(
       // defaultAIAction 读取缺少字段的 AI 设置并应用默认值。
       async () => hook.result.current.openAIModal(accountFixture),
     );
-    expect(hook.result.current.aiSettings).toMatchObject({ ai_enabled: false, max_discount_percent: 10, max_discount_amount: 100, max_bargain_rounds: 3, custom_prompts: '' });
+    expect(hook.result.current.aiSettings).toMatchObject({ ai_enabled: false, general_enabled: false, general_prompt_enabled: false, max_discount_percent: 10, max_discount_amount: 100, max_bargain_rounds: 3, custom_prompts: '' });
 
     passwordLoginMock.mockResolvedValueOnce({ success: true, session_id: 'session-failed', status: 'processing', message: '处理中' });
     passwordStatusMock.mockResolvedValueOnce({ status: 'failed', message: '密码登录失败' });

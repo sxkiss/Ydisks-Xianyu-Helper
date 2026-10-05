@@ -23,8 +23,22 @@ export interface AccountAISettingsModalProps {
 export const AccountAISettingsModal: React.FC<AccountAISettingsModalProps> = ({ account, settings, saving, onChange, onClose, onSave }) => {
   // updateSettings 使用最新草稿合并单个 AI 字段变化。
   const updateSettings = (patch: Partial<AIReplySettings>) => onChange({ ...settings, ...patch });
-  // handleEnabledChange 切换 AI 自动回复开关。
-  const handleEnabledChange = () => updateSettings(settings.ai_enabled ? { ai_enabled: false, auto_adjust_price_enabled: false } : { ai_enabled: true });
+  // handleEnabledChange 切换 AI 自动回复开关；关闭时一并关闭依赖它的子开关。
+  const handleEnabledChange = () => updateSettings(settings.ai_enabled
+    ? { ai_enabled: false, auto_adjust_price_enabled: false, general_enabled: false, general_prompt_enabled: false }
+    : { ai_enabled: true });
+  // handleGeneralChange 切换通用客服：把非砍价的普通买家消息也交给 AI。
+  const handleGeneralChange = () => {
+    if (!settings.ai_enabled) return;
+    updateSettings(settings.general_enabled
+      ? { general_enabled: false, general_prompt_enabled: false }
+      : { general_enabled: true });
+  };
+  // handleGeneralPromptChange 切换通用客服是否注入自定义提示词。
+  const handleGeneralPromptChange = () => {
+    if (!settings.general_enabled) return;
+    updateSettings({ general_prompt_enabled: !settings.general_prompt_enabled });
+  };
   // handleAutoAdjustChange 切换真实订单自动改价开关，AI 议价关闭时不允许单独开启。
   const handleAutoAdjustChange = () => {
     if (!settings.ai_enabled) return;
@@ -66,6 +80,24 @@ export const AccountAISettingsModal: React.FC<AccountAISettingsModalProps> = ({ 
           </div>
 
           <div className="border-t border-gray-200 pt-6">
+            <h3 className="text-lg font-bold text-gray-900 mb-4">通用客服</h3>
+            <div className="space-y-3">
+              <div className="flex items-center justify-between p-4 bg-emerald-50 rounded-xl">
+                <div className="pr-4"><div className="font-bold text-gray-900">回复普通咨询消息</div><div className="text-xs text-gray-500 mt-1">开启后，非砍价的买家消息（咨询、问价、售后等）也交给 AI 回复。关键词命中的消息仍走关键词回复。</div></div>
+                <button type="button" onClick={handleGeneralChange} disabled={!settings.ai_enabled} className={`w-14 h-8 rounded-full transition-colors duration-300 relative flex-shrink-0 ${settings.general_enabled ? 'bg-emerald-500' : 'bg-gray-300'} ${!settings.ai_enabled ? 'opacity-50 cursor-not-allowed' : ''}`} aria-label="切换通用客服">
+                  <span className={`absolute left-1 top-1 w-6 h-6 bg-white rounded-full shadow-md transition-transform duration-300 ${settings.general_enabled ? 'translate-x-6' : 'translate-x-0'}`} />
+                </button>
+              </div>
+              <div className="flex items-center justify-between p-4 bg-emerald-50 rounded-xl">
+                <div className="pr-4"><div className="font-bold text-gray-900">通用客服使用自定义提示词</div><div className="text-xs text-gray-500 mt-1">关闭时不下发任何 system 提示词，适用于接入自带人设的智能体（agent）。</div></div>
+                <button type="button" onClick={handleGeneralPromptChange} disabled={!settings.general_enabled} className={`w-14 h-8 rounded-full transition-colors duration-300 relative flex-shrink-0 ${settings.general_prompt_enabled ? 'bg-emerald-500' : 'bg-gray-300'} ${!settings.general_enabled ? 'opacity-50 cursor-not-allowed' : ''}`} aria-label="切换通用客服提示词">
+                  <span className={`absolute left-1 top-1 w-6 h-6 bg-white rounded-full shadow-md transition-transform duration-300 ${settings.general_prompt_enabled ? 'translate-x-6' : 'translate-x-0'}`} />
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="border-t border-gray-200 pt-6">
             <h3 className="text-lg font-bold text-gray-900 mb-4">砍价策略</h3>
             <div className="grid grid-cols-3 gap-4">
               <div><label className="block text-sm font-bold text-gray-700 mb-2">最大折扣比例 (%)</label><input type="number" value={settings.max_discount_percent} onChange={handleDiscountPercentChange} className="w-full ios-input px-4 py-3 rounded-xl" min="0" max="100" /><p className="text-xs text-gray-500 mt-1">例如：10 表示最多降价 10%；设为 0 表示不允许降价</p></div>
@@ -77,7 +109,7 @@ export const AccountAISettingsModal: React.FC<AccountAISettingsModalProps> = ({ 
           <div><label className="block text-sm font-bold text-gray-700 mb-2">自定义提示词（可选）</label><textarea value={settings.custom_prompts} onChange={handlePromptChange} placeholder="输入自定义的AI回复规则或风格指引...&#10;&#10;例如：回复时保持礼貌专业、使用简洁的语言、强调产品质量等" className="w-full ios-input px-4 py-3 rounded-xl h-40 resize-none" /></div>
           <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
             <h4 className="font-bold text-blue-900 mb-2 flex items-center gap-2"><Settings className="w-4 h-4" />AI如何工作</h4>
-            <ul className="text-xs text-blue-800 space-y-1"><li>• 自动识别买家的砍价请求</li><li>• 根据设定的策略智能回复</li><li>• 在合理范围内同意降价或礼貌拒绝</li><li>• 只有开启自动改价后，已发送给买家的有效报价才会用于真实订单改价</li></ul>
+            <ul className="text-xs text-blue-800 space-y-1"><li>• 开启通用客服后，普通咨询消息也会由 AI 回复（永不自动改价）</li><li>• 自动识别买家的砍价请求</li><li>• 根据设定的策略智能回复</li><li>• 在合理范围内同意降价或礼貌拒绝</li><li>• 只有开启自动改价后，已发送给买家的有效报价才会用于真实订单改价</li></ul>
           </div>
         </div>
 
