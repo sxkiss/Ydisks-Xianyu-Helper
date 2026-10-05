@@ -1,0 +1,273 @@
+package mtop
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"testing"
+)
+
+// TestAccountTaskEndpointsAndParsing 封装Test账号任务EndpointsAndParsing业务协调。
+func TestAccountTaskEndpointsAndParsing(t *testing.T) {
+	// received 用于本次流程后续判断的received
+	var received map[string]any
+	// server 用于本次流程后续判断的server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if // err 用于本次流程后续判断的err
+		err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		if // err 用于本次流程后续判断的err
+		err := json.Unmarshal([]byte(r.Form.Get("data")), &received); err != nil {
+			t.Fatalf("decode data: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Query().Get("api") {
+		case "mtop.taobao.idle.merchant.rate.list":
+			_, _ = w.Write([]byte(`{"ret":["SUCCESS::调用成功"],"data":{"module":{"items":[{"tradeInfo":{"tradeId":"order-1"},"item":{"itemId":"item-1"}},{"orderNo":"order-2","itemId":"item-2"}]}}}`))
+		case "mtop.taobao.idle.rate.create":
+			_, _ = w.Write([]byte(`{"ret":["SUCCESS::调用成功"],"data":{}}`))
+		case "mtop.taobao.idle.item.polish":
+			_, _ = w.Write([]byte(`{"ret":["SUCCESS::调用成功"],"data":{}}`))
+		default:
+			t.Fatalf("unexpected api: %s", r.URL.Query().Get("api"))
+		}
+	}))
+	defer server.Close()
+
+	// client 用于本次流程后续判断的client
+	client := &ClientImpl{HTTPClient: server.Client(), RateListURL: server.URL, RateCreateURL: server.URL, PolishItemURL: server.URL}
+	// cookies 用于本次流程后续判断的cookies
+	cookies := "unb=123; _m_h5_tk=token_1"
+	// pending、err 用于本次流程后续判断的pending、err
+	pending, err := client.FetchPendingRateOrders(context.Background(), cookies, 1, 50)
+	if err != nil || len(pending.Orders) != 2 || pending.Orders[0].TradeID != "order-1" || pending.Orders[0].ItemID != "item-1" {
+		t.Fatalf("pending=%+v err=%v", pending, err)
+	}
+	// rate、err 用于本次流程后续判断的rate、err
+	rate, err := client.RateBuyer(context.Background(), cookies, "order-1", "交易愉快")
+	if err != nil || !rate.Success || received["tradeId"] != "order-1" || received["feedback"] != "交易愉快" {
+		t.Fatalf("rate=%+v received=%+v err=%v", rate, received, err)
+	}
+	// polish、err 用于本次流程后续判断的polish、err
+	polish, err := client.PolishItem(context.Background(), cookies, "item-1")
+	if err != nil || !polish.Success || received["itemId"] != "item-1" {
+		t.Fatalf("polish=%+v received=%+v err=%v", polish, received, err)
+	}
+}
+
+// TestIsRateOrderExpiredErrRecognizesPermanentPlatformFailure 验证超过评价期限的结构化及包装错误会被识别为永久失败，其他业务错误不会误判。
+func TestIsRateOrderExpiredErrRecognizesPermanentPlatformFailure(t *testing.T) {
+	// expiredErr 保存平台明确拒绝超期订单的 MTOP 错误。
+	expiredErr := &MTopResponseError{API: "mtop.taobao.idle.rate.create", Kind: MTopErrorBusiness, Ret: []string{"FAIL_BIZ_BAD_REQUEST::超出30天的订单不允许评价||rate failed"}}
+	// wrappedErr 保存经过上层包装的同一平台错误，验证 errors.As 链路仍可识别。
+	wrappedErr := fmt.Errorf("评价动作失败: %w", expiredErr)
+	if !IsRateOrderExpiredErr(expiredErr) || !IsRateOrderExpiredErr(wrappedErr) {
+		t.Fatalf("超期评价错误未识别: direct=%v wrapped=%v", IsRateOrderExpiredErr(expiredErr), IsRateOrderExpiredErr(wrappedErr))
+	}
+	// otherErr 保存错误码或原因缺失的普通业务失败，必须继续走普通失败重试语义。
+	otherErr := &MTopResponseError{API: "mtop.taobao.idle.rate.create", Kind: MTopErrorBusiness, Ret: []string{"FAIL_BIZ_BAD_REQUEST::订单状态不允许评价"}}
+	if IsRateOrderExpiredErr(otherErr) || IsRateOrderExpiredErr(fmt.Errorf("FAIL_BIZ_BAD_REQUEST::订单状态不允许评价")) {
+		t.Fatal("普通评价业务错误不应被识别为超期永久失败")
+	}
+}
+
+// TestAccountTaskRequestUsesSignedForm 封装Test账号任务请求UsesSigned表单业务协调。
+func TestAccountTaskRequestUsesSignedForm(t *testing.T) {
+	// server 用于本次流程后续判断的server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.Header.Get("Cookie") == "" || r.URL.Query().Get("sign") == "" {
+			t.Fatalf("request method=%s cookie=%q query=%v", r.Method, r.Header.Get("Cookie"), r.URL.Query())
+		}
+		// body 用于本次流程后续判断的请求体
+		body, _ := url.ParseQuery(func() string { _ = r.ParseForm(); return r.Form.Encode() }())
+		if body.Get("data") == "" {
+			t.Fatal("missing data form")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ret":["FAIL_BIZ_IDLEITEM_POLISH_AGAIN::宝贝已经擦亮过了"],"data":{}}`))
+	}))
+	defer server.Close()
+	// client 用于本次流程后续判断的client
+	client := &ClientImpl{HTTPClient: server.Client(), PolishItemURL: server.URL}
+	// result、err 用于本次流程后续判断的result、err
+	result, err := client.PolishItem(context.Background(), "unb=123; _m_h5_tk=token_1", "item-1")
+	if err != nil || !result.Success {
+		t.Fatalf("duplicate polish should be success: result=%+v err=%v", result, err)
+	}
+}
+
+// TestAccountTaskRequestRefreshesWhenOnlyUnrelatedCookieChanges 验证令牌过期响应仅变化普通 Cookie 时仍主动刷新签名令牌。
+func TestAccountTaskRequestRefreshesWhenOnlyUnrelatedCookieChanges(t *testing.T) {
+	// rateCalls、tokenCalls 记录业务接口和官方 Token 接口的请求次数。
+	rateCalls, tokenCalls := 0, 0
+	// server 模拟先返回令牌过期并变化普通 Cookie，再通过刷新后的令牌返回成功。
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("api") == "mtop.taobao.idlemessage.pc.login.token" {
+			tokenCalls++
+			w.Header().Set("Set-Cookie", "_m_h5_tk=fresh_token_2; Path=/")
+			_, _ = w.Write([]byte(`{"ret":["SUCCESS::调用成功"],"data":{"accessToken":"access-1"}}`))
+			return
+		}
+		rateCalls++
+		if rateCalls == 1 {
+			w.Header().Set("Set-Cookie", "unrelated=rotated; Path=/")
+			_, _ = w.Write([]byte(`{"ret":["FAIL_SYS_TOKEN_EXOIRED::令牌过期"],"data":{}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"ret":["SUCCESS::调用成功"],"data":{"module":{"items":[]}}}`))
+	}))
+	defer server.Close()
+	// logs 捕获脱敏的续期诊断，验证实际轮换和后续重试都可被观察。
+	var logs bytes.Buffer
+	// client 使用本地 HTTP 服务替代业务接口和官方 Token 接口，并接入测试日志器。
+	client := &ClientImpl{
+		HTTPClient:  server.Client(),
+		Logger:      slog.New(slog.NewTextHandler(&logs, nil)),
+		RateListURL: server.URL + "/rate",
+		TokenURL:    server.URL + "/token",
+	}
+	// result、err 保存令牌刷新后业务请求的结果和错误。
+	result, err := client.FetchPendingRateOrders(context.Background(), "unb=123; _m_h5_tk=old_token_1", 1, 50)
+	if err != nil || result == nil || rateCalls != 2 || tokenCalls != 1 {
+		t.Fatalf("令牌过期未按要求刷新并重试: result=%+v rate_calls=%d token_calls=%d err=%v", result, rateCalls, tokenCalls, err)
+	}
+	if !strings.Contains(logs.String(), "MTOP Token 刷新成功") || !strings.Contains(logs.String(), "MTOP Token 刷新后业务接口重试成功") {
+		t.Fatalf("缺少 Token 刷新成功或重试成功日志: %s", logs.String())
+	}
+}
+
+// TestAccountTaskRequestRejectsTokenSuccessWithoutSigningCookieRotation 验证 Token 接口虽返回 accessToken 但未轮换签名 Cookie 时不会重复发送旧签名。
+func TestAccountTaskRequestRejectsTokenSuccessWithoutSigningCookieRotation(t *testing.T) {
+	// rateCalls、tokenCalls 记录业务接口和 Token 接口调用次数，确认无效刷新只触发一次各自请求。
+	rateCalls, tokenCalls := 0, 0
+	// server 模拟平台返回 Token 接口成功但没有新的 _m_h5_tk，业务接口始终拒绝旧签名。
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("api") == "mtop.taobao.idlemessage.pc.login.token" {
+			tokenCalls++
+			_, _ = w.Write([]byte(`{"ret":["SUCCESS::调用成功"],"data":{"accessToken":"access-1"}}`))
+			return
+		}
+		rateCalls++
+		_, _ = w.Write([]byte(`{"ret":["FAIL_SYS_TOKEN_EXOIRED::令牌过期"],"data":{}}`))
+	}))
+	defer server.Close()
+	// client 使用本地服务替代业务接口和官方 Token 接口。
+	client := &ClientImpl{HTTPClient: server.Client(), RateListURL: server.URL + "/rate", TokenURL: server.URL + "/token"}
+	// result、err 保存刷新未轮换签名 Cookie 时的结果和错误。
+	result, err := client.FetchPendingRateOrders(context.Background(), "unb=123; _m_h5_tk=old_token_1", 1, 50)
+	if result != nil || err == nil || !IsMTopTokenExpiredErr(err) {
+		t.Fatalf("未轮换签名 Cookie 应保留 Token 过期分类: result=%+v err=%v", result, err)
+	}
+	if rateCalls != 1 || tokenCalls != 1 {
+		t.Fatalf("旧签名不应重复发送: rate_calls=%d token_calls=%d", rateCalls, tokenCalls)
+	}
+}
+
+// TestPolishItemSendsItemPageSpmContext 验证擦亮请求携带商品页上下文，满足闲鱼当前接口对来源参数的校验。
+func TestPolishItemSendsItemPageSpmContext(t *testing.T) {
+	// server 校验擦亮主接口的版本、来源上下文和业务返回。
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("api") != "mtop.taobao.idle.item.polish" || r.URL.Query().Get("v") != "2.0" {
+			t.Fatalf("api=%q version=%q", r.URL.Query().Get("api"), r.URL.Query().Get("v"))
+		}
+		if r.URL.Query().Get("spm_cnt") != "a21ybx.item.0.0" || r.URL.Query().Get("spm_pre") != "a21ybx.personal.feeds.1.42f86ac21eZ9zd" || r.URL.Query().Get("log_id") != "42f86ac21eZ9zd" {
+			t.Fatalf("擦亮来源上下文错误: %v", r.URL.Query())
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ret":["SUCCESS::调用成功"],"data":{}}`))
+	}))
+	defer server.Close()
+	// client 使用本地服务替代平台端点，以便断言原始查询参数。
+	client := &ClientImpl{HTTPClient: server.Client(), PolishItemURL: server.URL}
+	// result、err 分别是擦亮结果和不应出现的请求错误。
+	result, err := client.PolishItem(context.Background(), "unb=123; _m_h5_tk=token_1", "item-1")
+	if err != nil || result == nil || !result.Success {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
+// TestPolishItemDefaultEndpointUsesVersionTwoPath 验证未覆盖端点时主擦亮接口路径与协议版本均为 2.0。
+func TestPolishItemDefaultEndpointUsesVersionTwoPath(t *testing.T) {
+	// endpoint 是默认擦亮端点，必须避免路径 1.0 与查询版本 2.0 的不一致请求。
+	endpoint := PolishItemAPI
+	if !strings.HasSuffix(endpoint, "/mtop.taobao.idle.item.polish/2.0/") {
+		t.Fatalf("默认擦亮端点错误: %q", endpoint)
+	}
+}
+
+// TestPolishItemFallsBackToAlternateAPI 封装TestPolish商品FallsBackToAlternateAPI业务协调。
+func TestPolishItemFallsBackToAlternateAPI(t *testing.T) {
+	// calls 用于本次流程后续判断的calls
+	var calls []string
+	// server 用于本次流程后续判断的server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// api 用于本次流程后续判断的api
+		api := r.URL.Query().Get("api")
+		calls = append(calls, api)
+		w.Header().Set("Content-Type", "application/json")
+		if api == "mtop.taobao.idle.item.polish" {
+			_, _ = w.Write([]byte(`{"ret":["FAIL_BIZ_FORBIDDEN::主接口暂不可用"],"data":{}}`))
+			return
+		}
+		if api != "mtop.idle.item.polish" || r.URL.Query().Get("v") != "1.0" {
+			t.Fatalf("unexpected backup request: api=%s version=%s", api, r.URL.Query().Get("v"))
+		}
+		if // err 用于本次流程后续判断的err
+		err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		// data 用于本次流程后续判断的数据
+		var data map[string]any
+		if // err 用于本次流程后续判断的err
+		err := json.Unmarshal([]byte(r.Form.Get("data")), &data); err != nil || data["itemId"] != "item-1" {
+			t.Fatalf("backup data=%v err=%v", data, err)
+		}
+		_, _ = w.Write([]byte(`{"ret":["SUCCESS::调用成功"],"data":{}}`))
+	}))
+	defer server.Close()
+	// client 用于本次流程后续判断的client
+	client := &ClientImpl{HTTPClient: server.Client(), PolishItemURL: server.URL, PolishItemBackupURL: server.URL}
+	// result、err 用于本次流程后续判断的result、err
+	result, err := client.PolishItem(context.Background(), "unb=123; _m_h5_tk=token_1", "item-1")
+	if err != nil || result == nil || !result.Success {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	// want 用于本次流程后续判断的want
+	want := []string{"mtop.taobao.idle.item.polish", "mtop.idle.item.polish"}
+	if len(calls) != len(want) || calls[0] != want[0] || calls[1] != want[1] {
+		t.Fatalf("calls=%v want=%v", calls, want)
+	}
+}
+
+// TestPolishItemSessionExpiredDoesNotCallBackupOrTokenAPI 封装TestPolish商品会话ExpiredDoesNotCallBackupOr令牌API业务协调。
+func TestPolishItemSessionExpiredDoesNotCallBackupOrTokenAPI(t *testing.T) {
+	// calls 用于本次流程后续判断的calls
+	calls := 0
+	// server 用于本次流程后续判断的server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		_, _ = w.Write([]byte(`{"ret":["FAIL_SYS_SESSION_EXPIRED::Session过期"],"data":{}}`))
+	}))
+	defer server.Close()
+	// client 用于本次流程后续判断的client
+	client := &ClientImpl{
+		HTTPClient: server.Client(), PolishItemURL: server.URL, PolishItemBackupURL: server.URL, TokenURL: server.URL,
+	}
+	// err 用于本次流程后续判断的err
+	_, err := client.PolishItem(context.Background(), "unb=123; _m_h5_tk=token_1", "item-1")
+	if err == nil || !IsSessionExpiredErr(err) {
+		t.Fatalf("err=%v want session expired", err)
+	}
+	if calls != 1 {
+		t.Fatalf("session expiry must stop all fallback/retry requests, calls=%d", calls)
+	}
+}

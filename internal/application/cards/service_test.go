@@ -1,0 +1,439 @@
+package cards
+
+import (
+	"context"
+	"errors"
+	"reflect"
+	"testing"
+)
+
+// cardRepositoryStub 记录应用服务对卡券持久化 Port 的调用，并允许测试注入各阶段结果。
+type cardRepositoryStub struct {
+	// cards 是列表查询返回的卡券组。
+	cards []Card
+	// card 是单卡查询返回的卡券组。
+	card Card
+	// listErr、getErr、createErr、updateErr、deleteErr 和 appendErr 分别控制各持久化阶段的失败结果。
+	listErr, getErr, createErr, updateErr, deleteErr, appendErr error
+	// createdID 是创建成功时返回的稳定标识。
+	createdID int64
+	// listedUserID 是列表查询收到的用户标识。
+	listedUserID int64
+	// gotCardID 是单卡查询收到的卡券标识。
+	gotCardID int64
+	// createdCard 和 updatedCard 是创建、更新阶段收到的应用模型。
+	createdCard, updatedCard Card
+	// deletedCardID 是删除阶段收到的卡券标识。
+	deletedCardID int64
+	// appendedCardID 和 appendedContent 是追加库存阶段收到的标识与内容。
+	appendedCardID  int64
+	appendedContent string
+	// appendedCount 是追加成功时返回的有效库存行数。
+	appendedCount int
+}
+
+// ListForUser 返回预设列表并记录用户隔离条件。
+func (r *cardRepositoryStub) ListForUser(_ context.Context, userID int64) ([]Card, error) {
+	r.listedUserID = userID
+	return r.cards, r.listErr
+}
+
+// Get 返回预设卡券并记录查询标识。
+func (r *cardRepositoryStub) Get(_ context.Context, cardID int64) (Card, error) {
+	r.gotCardID = cardID
+	return r.card, r.getErr
+}
+
+// GetFull 返回更新用的完整卡券并复用测试替身的错误控制。
+func (r *cardRepositoryStub) GetFull(_ context.Context, cardID int64) (Card, error) {
+	r.gotCardID = cardID
+	return r.card, r.getErr
+}
+
+// Create 记录待创建卡券并返回预设标识或错误。
+func (r *cardRepositoryStub) Create(_ context.Context, card Card) (int64, error) {
+	r.createdCard = card
+	return r.createdID, r.createErr
+}
+
+// Update 记录待更新卡券并返回预设错误。
+func (r *cardRepositoryStub) Update(_ context.Context, card Card) error {
+	r.updatedCard = card
+	return r.updateErr
+}
+
+// UpdateDataMetadata 记录不覆盖库存正文的数据卡元数据更新。
+func (r *cardRepositoryStub) UpdateDataMetadata(_ context.Context, card Card) error {
+	r.updatedCard = card
+	// DataContent 模拟数据库在元数据更新中保留的当前库存正文。
+	r.updatedCard.DataContent = r.card.DataContent
+	return r.updateErr
+}
+
+// Delete 记录待删除卡券标识并返回预设错误。
+func (r *cardRepositoryStub) Delete(_ context.Context, cardID int64) error {
+	r.deletedCardID = cardID
+	return r.deleteErr
+}
+
+// AppendData 记录追加库存请求，并返回预设行数或错误。
+func (r *cardRepositoryStub) AppendData(_ context.Context, cardID int64, content string) (int, error) {
+	r.appendedCardID = cardID
+	r.appendedContent = content
+	return r.appendedCount, r.appendErr
+}
+
+// TestServiceListAndGet 验证列表隔离、详情归属和查询错误边界。
+func TestServiceListAndGet(t *testing.T) {
+	// repository 是本测试共享的可观测持久化替身。
+	repository := &cardRepositoryStub{cards: []Card{{ID: 3, UserID: 7}}, card: Card{ID: 3, UserID: 7}}
+	// service 是绑定替身仓储的卡券应用服务。
+	service := NewService(repository)
+	// ctx 是本测试使用的非取消上下文。
+	ctx := context.Background()
+	// cards、listErr 保存列表用例结果。
+	cards, listErr := service.List(ctx, 7)
+	if listErr != nil || repository.listedUserID != 7 || !reflect.DeepEqual(cards, repository.cards) {
+		t.Fatalf("列表结果异常 cards=%+v user=%d err=%v", cards, repository.listedUserID, listErr)
+	}
+	// card、getErr 保存详情用例结果。
+	card, getErr := service.Get(ctx, 7, 3)
+	if getErr != nil || card.ID != 3 || repository.gotCardID != 3 {
+		t.Fatalf("详情结果异常 card=%+v queried=%d err=%v", card, repository.gotCardID, getErr)
+	}
+	// infraErr 是用于验证数据库故障不会伪装成资源缺失的错误。
+	infraErr := errors.New("database unavailable")
+	repository.getErr = infraErr
+	// err 表示详情查询透传的基础设施错误。
+	if _, err := service.Get(ctx, 7, 3); !errors.Is(err, infraErr) {
+		t.Fatalf("基础设施错误应原样返回，err=%v", err)
+	}
+	repository.getErr = nil
+	repository.card.UserID = 8
+	// err 表示跨用户详情查询返回的所有权错误。
+	if _, err := service.Get(ctx, 7, 3); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("跨用户详情应拒绝，err=%v", err)
+	}
+}
+
+// TestServiceCreateValidation 验证创建输入规则、API 类型限制和所有者写入。
+func TestServiceCreateValidation(t *testing.T) {
+	// repository 是记录创建输入的持久化替身。
+	repository := &cardRepositoryStub{createdID: 19}
+	// service 是待验证的卡券应用服务。
+	service := NewService(repository)
+	// valid 是覆盖全部可编辑字段的合法文本卡券输入。
+	valid := Draft{Name: "文本卡", Type: "text", TextContent: "CODE", Description: "说明", Enabled: true, DelaySeconds: 9, IsMultiSpec: true, SpecName: "颜色", SpecValue: "蓝"}
+	// createdID、createErr 保存创建结果。
+	createdID, createErr := service.Create(context.Background(), 7, valid)
+	if createErr != nil || createdID != 19 {
+		t.Fatalf("创建结果异常 id=%d err=%v", createdID, createErr)
+	}
+	if repository.createdCard.UserID != 7 || repository.createdCard.Name != valid.Name || repository.createdCard.ID != 0 {
+		t.Fatalf("创建模型未正确绑定所有者：%+v", repository.createdCard)
+	}
+	// testCase 是当前待验证的非法输入及期望错误。
+	for _, testCase := range []struct {
+		// name 是失败场景名称。
+		name string
+		// draft 是当前场景提交的卡券输入。
+		draft Draft
+		// want 是期望出现的稳定错误文本。
+		want string
+	}{
+		{name: "missing-name", draft: Draft{Type: "text", TextContent: "x"}, want: "名称和类型不能为空"},
+		{name: "invalid-type", draft: Draft{Name: "x", Type: "unknown"}, want: "类型必须为 text、data、image 或 api"},
+		{name: "invalid-delay", draft: Draft{Name: "x", Type: "text", TextContent: "x", DelaySeconds: 3601}, want: "延时发货必须在 0 到 3600 秒之间"},
+		{name: "empty-text", draft: Draft{Name: "x", Type: "text", TextContent: "  "}, want: "文本卡密内容不能为空"},
+		{name: "empty-data", draft: Draft{Name: "x", Type: "data", DataContent: "\n"}, want: "数据卡密内容不能为空"},
+		{name: "empty-image", draft: Draft{Name: "x", Type: "image", ImageURL: ""}, want: "图片卡密 URL 不能为空"},
+		{name: "non-http-image", draft: Draft{Name: "x", Type: "image", ImageURL: "file:///tmp/card.png"}, want: "图片卡密 URL 必须是 HTTP(S) 地址"},
+		{name: "credential-image", draft: Draft{Name: "x", Type: "image", ImageURL: "https://user:pass@example.com/card.png"}, want: "图片卡密 URL 必须是 HTTP(S) 地址"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			// err 是当前非法输入返回的业务校验结果。
+			_, err := service.Create(context.Background(), 7, testCase.draft)
+			// validationError 用于确认错误保留业务校验类型。
+			var validationError *ValidationError
+			if !errors.As(err, &validationError) || err.Error() != testCase.want {
+				t.Fatalf("校验错误不匹配 err=%v want=%q", err, testCase.want)
+			}
+		})
+	}
+	// err 表示创建合法 API 卡券时的业务校验结果。
+	if _, err := service.Create(context.Background(), 7, Draft{Name: "API", Type: "api", APIConfig: `{"url":"https://example.com/card"}`}); err != nil {
+		t.Fatalf("新建 API 卡券应允许，err=%v", err)
+	}
+}
+
+// TestServiceUpdateAndDeleteOwnership 验证更新、删除不会接受请求覆盖所有者，并覆盖 API 转换与错误阶段。
+func TestServiceUpdateAndDeleteOwnership(t *testing.T) {
+	// updateErr 是更新持久化失败的预设错误。
+	updateErr := errors.New("update failed")
+	// repository 是当前测试的持久化替身，卡券归属于用户 7。
+	repository := &cardRepositoryStub{card: Card{ID: 5, UserID: 7, Type: "text"}, updateErr: updateErr}
+	// service 是待验证的卡券应用服务。
+	service := NewService(repository)
+	// draft 是合法的文本卡券更新输入。
+	draft := Draft{Name: "new", Type: "text", TextContent: "value", Enabled: true}
+	// err 表示更新卡券组时透传的持久化错误。
+	if err := service.Update(context.Background(), 7, 5, draft); !errors.Is(err, updateErr) {
+		t.Fatalf("更新错误应原样返回，err=%v", err)
+	}
+	if repository.updatedCard.ID != 5 || repository.updatedCard.UserID != 7 || repository.updatedCard.Name != "new" {
+		t.Fatalf("更新模型未保留标识和所有者：%+v", repository.updatedCard)
+	}
+	repository.updateErr = nil
+	// err 表示非 API 卡券转换为 API 类型时的业务校验结果。
+	if err := service.Update(context.Background(), 7, 5, Draft{Name: "api", Type: "api", APIConfig: `{"url":"https://example.com/card"}`}); err != nil {
+		t.Fatalf("非 API 卡券转换为 API 应允许，err=%v", err)
+	}
+	repository.card.Type = "api"
+	repository.card.APIConfig = `{"url":"https://example.com/card"}`
+	// err 表示既有 API 卡券继续编辑时的更新结果。
+	if err := service.Update(context.Background(), 7, 5, Draft{Name: "legacy", Type: "api"}); err != nil {
+		t.Fatalf("既有 API 卡券应允许继续编辑，err=%v", err)
+	}
+	// repository.card 切回文本类型，验证转换为 data 时缺少库存仍会被拒绝。
+	repository.card.Type = "text"
+	// err 表示文本卡转换为 data 且未提供库存时的校验错误。
+	if err := service.Update(context.Background(), 7, 5, Draft{Name: "invalid-data", Type: "data"}); err == nil {
+		t.Fatal("非 data 卡转换为空 data 不应静默成功")
+	}
+	repository.card.UserID = 8
+	// err 表示跨用户删除卡券时的所有权错误。
+	if err := service.Delete(context.Background(), 7, 5); !errors.Is(err, ErrForbidden) || repository.deletedCardID != 0 {
+		t.Fatalf("跨用户删除应在持久化前拒绝，deleted=%d err=%v", repository.deletedCardID, err)
+	}
+	repository.card.UserID = 7
+	// deleteErr 是删除阶段持久化失败的预设错误。
+	deleteErr := errors.New("delete failed")
+	repository.deleteErr = deleteErr
+	// err 表示删除卡券组时透传的持久化错误。
+	if err := service.Delete(context.Background(), 7, 5); !errors.Is(err, deleteErr) || repository.deletedCardID != 5 {
+		t.Fatalf("删除错误或标识不匹配，deleted=%d err=%v", repository.deletedCardID, err)
+	}
+}
+
+// TestServiceUpdateDataMetadataRetainsStock 验证仅更新 data 卡元数据时不会覆盖并发消费后的库存。
+func TestServiceUpdateDataMetadataRetainsStock(t *testing.T) {
+	// repository 保存模拟自动化已消费一行之后的当前完整卡券。
+	repository := &cardRepositoryStub{card: Card{ID: 18, UserID: 7, Name: "库存卡", Type: "data", DataContent: "未消费行", Enabled: true, IsMultiSpec: true, SpecName: "套餐", SpecValue: "年度"}}
+	// service 是使用可观测仓储的卡券应用服务。
+	service := NewService(repository)
+	// draft 只携带页面启停动作的元数据，不携带可能过期的库存正文。
+	draft := Draft{Name: "库存卡", Type: "data", Enabled: false}
+	// updateErr 保存元数据更新执行结果。
+	updateErr := service.Update(context.Background(), 7, 18, draft)
+	if updateErr != nil || repository.updatedCard.DataContent != "未消费行" || repository.updatedCard.Enabled || !repository.updatedCard.IsMultiSpec || repository.updatedCard.SpecName != "套餐" || repository.updatedCard.SpecValue != "年度" {
+		t.Fatalf("元数据更新覆盖库存 updated=%+v err=%v", repository.updatedCard, updateErr)
+	}
+	// explicitEmptyErr 保存用户明确清空库存时的校验结果，不能被误当成省略库存字段。
+	explicitEmptyErr := service.Update(context.Background(), 7, 18, Draft{Name: "库存卡", Type: "data", Enabled: true, DataContentSet: true})
+	if explicitEmptyErr == nil {
+		t.Fatal("显式空库存不应被当作元数据更新而静默保留")
+	}
+	// explicitContentErr 验证替换库存正文时未提交的规格字段仍保持原匹配条件。
+	explicitContentErr := service.Update(context.Background(), 7, 18, Draft{Name: "库存卡", Type: "data", Enabled: true, DataContent: "新库存", DataContentSet: true})
+	if explicitContentErr != nil || repository.updatedCard.IsMultiSpec != true || repository.updatedCard.SpecName != "套餐" || repository.updatedCard.SpecValue != "年度" {
+		t.Fatalf("替换库存时规格条件被清空 updated=%+v err=%v", repository.updatedCard, explicitContentErr)
+	}
+}
+
+// TestServiceRejectsInvalidDependenciesAndIdentifiers 验证空仓储、无效用户和无效卡券标识均在持久化前失败。
+func TestServiceRejectsInvalidDependenciesAndIdentifiers(t *testing.T) {
+	// err 表示空仓储依赖导致的应用服务装配错误。
+	if _, err := NewService(nil).List(context.Background(), 1); err == nil {
+		t.Fatal("空仓储应返回装配错误")
+	}
+	// repository 是用于确认非法参数不会产生有效查询的持久化替身。
+	repository := &cardRepositoryStub{}
+	// service 是绑定替身仓储的卡券应用服务。
+	service := NewService(repository)
+	// err 表示无效用户身份导致的业务参数错误。
+	if _, err := service.Get(context.Background(), 0, 1); !errors.Is(err, ErrInvalidUser) {
+		t.Fatalf("无效用户应拒绝，err=%v", err)
+	}
+	// err 表示无效卡券标识导致的业务参数错误。
+	if _, err := service.Get(context.Background(), 1, 0); !errors.Is(err, ErrInvalidCardID) {
+		t.Fatalf("无效卡券标识应拒绝，err=%v", err)
+	}
+}
+
+// TestServiceExistsOwned 验证批量发布使用的卡券归属查询在成功、越权、缺失和基础设施故障时保持可区分错误。
+func TestServiceExistsOwned(t *testing.T) {
+	// repository 是返回指定卡券详情的持久化替身。
+	repository := &cardRepositoryStub{card: Card{ID: 8, UserID: 7}}
+	// service 是绑定归属查询替身仓储的卡券应用服务。
+	service := NewService(repository)
+	// exists、err 保存当前用户成功查询卡券归属的结果。
+	exists, err := service.ExistsOwned(context.Background(), 7, 8)
+	if err != nil || !exists {
+		t.Fatalf("归属查询应成功，exists=%t err=%v", exists, err)
+	}
+	// repository.card 切换为其他用户，验证越权不会被误报为存在。
+	repository.card.UserID = 9
+	// exists、err 保存越权查询的结果。
+	exists, err = service.ExistsOwned(context.Background(), 7, 8)
+	if exists || !errors.Is(err, ErrForbidden) {
+		t.Fatalf("越权卡券应拒绝，exists=%t err=%v", exists, err)
+	}
+	// repository.card 恢复当前用户，随后注入资源缺失错误。
+	repository.card.UserID = 7
+	repository.getErr = ErrNotFound
+	// exists、err 保存资源缺失查询的结果。
+	exists, err = service.ExistsOwned(context.Background(), 7, 8)
+	if exists || !errors.Is(err, ErrNotFound) {
+		t.Fatalf("缺失卡券应返回未找到，exists=%t err=%v", exists, err)
+	}
+	// infraErr 是用于验证数据库故障不会被归一化为资源缺失的错误。
+	infraErr := errors.New("card ownership unavailable")
+	repository.getErr = infraErr
+	// exists、err 保存基础设施故障查询的结果。
+	exists, err = service.ExistsOwned(context.Background(), 7, 8)
+	if exists || !errors.Is(err, infraErr) {
+		t.Fatalf("基础设施错误应原样返回，exists=%t err=%v", exists, err)
+	}
+}
+
+// TestServiceAppendData 验证追加库存的输入、归属、类型和持久化错误边界。
+func TestServiceAppendData(t *testing.T) {
+	// repository 是记录追加请求并提供卡券归属的持久化替身。
+	repository := &cardRepositoryStub{
+		card:          Card{ID: 8, UserID: 7, Type: "data"},
+		appendedCount: 2,
+	}
+	// service 是绑定追加库存替身仓储的应用服务。
+	service := NewService(repository)
+	// added、addErr 保存成功追加的有效行数和错误。
+	added, addErr := service.AppendData(context.Background(), 7, 8, " A\nB ")
+	if addErr != nil || added != 2 || repository.appendedCardID != 8 || repository.appendedContent != "A\nB" {
+		t.Fatalf("追加结果异常 added=%d err=%v id=%d content=%q", added, addErr, repository.appendedCardID, repository.appendedContent)
+	}
+	// err 表示空内容在查询卡券前返回的稳定校验错误。
+	if _, err := service.AppendData(context.Background(), 7, 8, " \n "); !errors.As(err, new(*ValidationError)) {
+		t.Fatalf("空内容应返回校验错误，err=%v", err)
+	}
+	// repository.card.UserID 切换为其他用户，验证所有权边界不会调用追加仓储。
+	repository.card.UserID = 9
+	repository.appendedCardID = 0
+	// err 表示跨用户库存追加被所有权检查拒绝的业务错误。
+	if _, err := service.AppendData(context.Background(), 7, 8, "C"); !errors.Is(err, ErrForbidden) || repository.appendedCardID != 0 {
+		t.Fatalf("跨用户追加应拒绝且不写入，id=%d err=%v", repository.appendedCardID, err)
+	}
+	// repository.card 恢复为当前用户但标记为非 data 类型，验证类型约束。
+	repository.card.UserID = 7
+	repository.card.Type = "text"
+	// err 表示非 data 卡券无法追加逐行库存的类型错误。
+	if _, err := service.AppendData(context.Background(), 7, 8, "C"); !errors.Is(err, ErrNotDataType) {
+		t.Fatalf("非 data 类型应拒绝，err=%v", err)
+	}
+	// getErr 是资源读取阶段返回的缺失错误，追加不得触发写入。
+	repository.card.Type = "data"
+	repository.getErr = ErrNotFound
+	repository.appendedCardID = 0
+	// err 表示资源读取阶段发现卡券不存在时返回的稳定错误。
+	if _, err := service.AppendData(context.Background(), 7, 8, "C"); !errors.Is(err, ErrNotFound) || repository.appendedCardID != 0 {
+		t.Fatalf("不存在卡券应返回未找到且不写入，id=%d err=%v", repository.appendedCardID, err)
+	}
+	repository.getErr = nil
+	// infraErr 是追加阶段的基础设施故障，服务应原样透传。
+	infraErr := errors.New("append unavailable")
+	repository.appendErr = infraErr
+	// err 表示库存持久化端口返回的基础设施错误。
+	if _, err := service.AppendData(context.Background(), 7, 8, "C"); !errors.Is(err, infraErr) {
+		t.Fatalf("追加基础设施错误应透传，err=%v", err)
+	}
+}
+
+// TestServiceCoversRemainingCRUDBoundaries 验证卡券 CRUD 的无效标识、API 校验和端口错误边界。
+func TestServiceCoversRemainingCRUDBoundaries(t *testing.T) {
+	// ctx 是卡券 CRUD 边界测试上下文。
+	ctx := context.Background()
+	// repository 是可注入各阶段错误的卡券持久化替身。
+	repository := &cardRepositoryStub{card: Card{ID: 5, UserID: 7, Type: "text"}, createdID: 9}
+	// service 是待验证的卡券应用服务。
+	service := NewService(repository)
+	if // message 是 nil 校验错误的稳定文本。
+	message := (*ValidationError)(nil).Error(); message == "" {
+		t.Fatal("nil 校验错误应有稳定文本")
+	}
+	if // err 是 ExistsOwned 无效卡券标识的参数错误。
+	_, err := service.ExistsOwned(ctx, 7, 0); !errors.Is(err, ErrInvalidCardID) {
+		t.Fatalf("无效归属卡券标识错误异常: %v", err)
+	}
+	if // err 是 Update 无效卡券标识的参数错误。
+	err := service.Update(ctx, 7, 0, Draft{Name: "x", Type: "text", TextContent: "v"}); !errors.Is(err, ErrInvalidCardID) {
+		t.Fatalf("无效更新标识错误异常: %v", err)
+	}
+	if // err 是 Delete 无效卡券标识的参数错误。
+	err := service.Delete(ctx, 7, 0); !errors.Is(err, ErrInvalidCardID) {
+		t.Fatalf("无效删除标识错误异常: %v", err)
+	}
+	if // err 是 AppendData 无效用户的参数错误。
+	_, err := service.AppendData(ctx, 0, 5, "data"); !errors.Is(err, ErrInvalidUser) {
+		t.Fatalf("无效追加用户错误异常: %v", err)
+	}
+	if // err 是 ExistsOwned 无效用户的参数错误。
+	_, err := service.ExistsOwned(ctx, 0, 5); !errors.Is(err, ErrInvalidUser) {
+		t.Fatalf("无效归属用户错误异常: %v", err)
+	}
+	if // err 是 Create 无效用户的参数错误。
+	_, err := service.Create(ctx, 0, Draft{Name: "data", Type: "data", DataContent: "CODE"}); !errors.Is(err, ErrInvalidUser) {
+		t.Fatalf("无效创建用户错误异常: %v", err)
+	}
+	if // err 是 Update 无效用户的参数错误。
+	err := service.Update(ctx, 0, 5, Draft{Name: "x", Type: "text", TextContent: "v"}); !errors.Is(err, ErrInvalidUser) {
+		t.Fatalf("无效更新用户错误异常: %v", err)
+	}
+	if // err 是 Delete 无效用户的参数错误。
+	err := service.Delete(ctx, 0, 5); !errors.Is(err, ErrInvalidUser) {
+		t.Fatalf("无效删除用户错误异常: %v", err)
+	}
+	// createFailure 是卡券创建端口错误。
+	createFailure := errors.New("create failed")
+	repository.createErr = createFailure
+	if // err 是合法创建请求的端口错误。
+	_, err := service.Create(ctx, 7, Draft{Name: "data", Type: "data", DataContent: "CODE"}); !errors.Is(err, createFailure) {
+		t.Fatalf("创建端口错误未透传: %v", err)
+	}
+	// repository.getErr 保存 API 更新归属读取错误。
+	repository.getErr = errors.New("get full failed")
+	if // err 是更新读取完整卡券时的端口错误。
+	err := service.Update(ctx, 7, 5, Draft{Name: "api", Type: "api", APIConfig: `{"url":"https://example.test"}`}); !errors.Is(err, repository.getErr) {
+		t.Fatalf("更新读取错误未透传: %v", err)
+	}
+	repository.getErr = nil
+	if // err 是 API 更新配置校验错误。
+	err := service.Update(ctx, 7, 5, Draft{Name: "api", Type: "api", APIConfig: "{"}); err == nil {
+		t.Fatal("非法 API 更新配置应被拒绝")
+	}
+	if // err 是草稿校验错误。
+	err := service.Update(ctx, 7, 5, Draft{Name: "", Type: "text", TextContent: "v"}); err == nil {
+		t.Fatal("非法更新草稿应被拒绝")
+	}
+	if // err 是创建 API 配置校验错误。
+	_, err := service.Create(ctx, 7, Draft{Name: "api", Type: "api", APIConfig: "{"}); err == nil {
+		t.Fatal("非法 API 创建配置应被拒绝")
+	}
+	if // err 是 API 草稿缺少配置内容的校验错误。
+	err := validateDraft(Draft{Name: "api", Type: "api"}); err == nil {
+		t.Fatal("缺少 API 配置应被拒绝")
+	}
+	// repository.card 保存跨用户完整卡券，验证更新归属拒绝。
+	repository.card.UserID = 8
+	if // err 是更新完整卡券跨用户错误。
+	err := service.Update(ctx, 7, 5, Draft{Name: "x", Type: "text", TextContent: "v"}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("更新跨用户错误异常: %v", err)
+	}
+	// repository.card 恢复当前用户，验证合法追加 API 后的端口返回。
+	repository.card.UserID = 7
+	repository.card.Type = "data"
+	repository.appendedCount = 1
+	if // err 是合法追加端口结果。
+	_, err := service.AppendData(ctx, 7, 5, "CODE"); err != nil {
+		t.Fatalf("合法追加失败: %v", err)
+	}
+}
+
+var _ Repository = (*cardRepositoryStub)(nil)

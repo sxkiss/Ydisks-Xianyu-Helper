@@ -1,0 +1,793 @@
+# Ydisks闲鱼助手（中文）
+
+基于 Go 与 React 构建的闲鱼多账号管理、消息回复与自动发货系统
+
+[![Go](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)](go.mod)
+[![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](frontend/package.json)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-4169E1?logo=postgresql&logoColor=white)](compose.yml)
+[![正式发布](https://github.com/Christ9038/Ydisks-Xianyu-Helper/actions/workflows/release.yml/badge.svg)](https://github.com/Christ9038/Ydisks-Xianyu-Helper/actions/workflows/release.yml)
+
+[English README](README.md) · 中文文档 · [中文 Wiki](docs/wiki/Home.zh-CN.md) · [English Wiki](docs/wiki/Home.md)
+
+[功能特性](#功能特性) · [快速开始](#快速开始) · [配置说明](#配置说明) ·
+[Docker 部署](#docker-部署) · [开发指南](#开发指南) · [贡献指南](CONTRIBUTING.md) ·
+[安全策略](SECURITY.md) · [行为准则](CODE_OF_CONDUCT.md) · [开源协议](#开源协议)
+
+操作手册见仓库内的 [GitHub Wiki 文档](docs/wiki/Home.zh-CN.md)：包含数据库选择、账号接入、
+在线聊天、账号自动任务、批量铺货、自动化发货、AI、通知和运维流程。
+
+> [!IMPORTANT]
+> 本项目仅用于个人技术学习研究，**未获得闲鱼/阿里巴巴任何官方授权**。
+>
+> 本项目调用闲鱼网页端非公开接口，使用本软件将违反闲鱼用户协议，可能造成闲鱼账号封禁。
+>
+> 本项目是社区维护的非官方工具，与闲鱼、阿里巴巴集团及其关联公司无隶属、合作或授权关系。
+>
+> 请仅在遵守当地法律法规的前提下使用，所有使用该代码造成的一切后果，全部由使用者自行承担，项目作者不承担任何责任。
+>
+> 收到平台下架通知时，本项目会随时删除归档。
+>
+> **有账号登录时，不要频繁重启本程序!**
+>
+> **每次重启都会向闲鱼申请登录凭证，达到某个频率，即会触发风控。**
+
+## 项目简介
+
+Ydisks闲鱼助手是一个面向闲鱼卖家的自托管管理系统。它将账号运行、即时消息、订单、
+商品、卡密库存、自动化规则、AI 回复和异常通知整合到同一个 Web 管理后台，适合需要
+同时维护多个闲鱼账号或交付虚拟商品的个人与小型团队。
+
+项目采用 Go 语言实现闲鱼登录、Cookie 续期、MTOP 请求和 WebSocket 消息链路。
+扫码登录、人脸验证流程、消息连接、凭证更新和绝大部分业务逻辑均由 Go 客户端完成。
+使用 Chromium 处理必须依赖浏览器环境的相关功能。
+
+### 与 Ydisks 网盘拉新助手协同使用
+
+如果你通过网盘资料、教程包或数字资源做闲鱼推广，推荐搭配
+[Ydisks 网盘拉新助手](https://www.ydisks.com) 使用：先为不同商品、渠道或推广账号
+创建独立短链，再在 Ydisks 控制台查看短链与目标页面的 PV、UV、趋势、排行及渠道/账号报表。
+这样，Ydisks 负责识别“链接从哪里带来访问与转化线索”，Ydisks闲鱼助手负责承接账号消息、
+订单和自动发货，帮助你把投放复盘与日常交付放进一套更清晰的运营流程。
+
+Ydisks 支持管理渠道、推广账号、原始链接、推广短链与域名，适用于网盘拉新和推广投放场景；
+可从 [Ydisks 网盘拉新助手使用文档](https://docs.ydisks.com/guide/quick-start) 开始创建推广链接并查看数据。
+
+
+### 适用场景
+
+- 多个闲鱼账号的统一在线状态与消息管理
+- 数字商品、兑换码、链接或图片内容的自动交付
+- 付款后发货、分阶段砍价免拼、评价赠品、超时求评价等自动化流程
+- 商品与订单同步、单商品单规格/多规格发布、规格图片与主图排序，以及支持逐行/默认类目、自动识别和最终兜底的表格批量铺货
+- 接入 OpenAI 兼容接口实现可控的 AI 客服回复，并可在后台测试完整连接链路
+
+### 交流群
+
+![Ydisks闲鱼助TG](https://raw.githubusercontent.com/Christ9038/Ydisks-Xianyu-Helper/main/docs/img/telegram.jpg)
+
+## 功能特性
+
+| 模块 | 能力 |
+| --- | --- |
+| 账号管理 | 多账号启停、扫码登录、资料刷新、在线状态、登录审计与备注管理 |
+| 凭证续期 | Cookie/token 定时续期、WebSocket 凭证更新、失效恢复、冷却与失败停用 |
+| 即时消息 | 按账号隔离的在线聊天、会话列表与历史消息、闲鱼表情、文本/图片收发、官方系统消息识别、关键词回复、默认回复及仅回复一次 |
+| 自动化中心 | 拍下未付款自动改价、付款后自动发货、分阶段砍价免拼、评价后赠品、超时未评价提醒、失败任务恢复、人工处理通知与幂等检查点 |
+| 账号自动任务 | 基于本地记录的买家确认收货事实执行自动评价、按北京时间每日擦亮、手动立即执行、执行记录与幂等保护 |
+| 卡密库存 | 文本、批量卡密、图片和 API 四种交付类型，库存追加、批量导入、规格与延迟发送 |
+| 商品管理 | 商品同步、手工关联、单商品单规格/多规格发布、规格图片与商品图片排序、CSV/XLSX/TSV 与可选 ZIP 批量铺货、关键词获取默认类目、逐行类目优先、自动识别与“电子资料”最终兜底、任务恢复与结果导出；列表同步依据 `detailParams.isSKU` 判断多规格，字段缺失或为 `false` 均按非多规格处理，不再访问详情页 |
+| 发货模板 | 多条顺序消息、订单/买家/卡密/自定义变量和可复用的自动化发货内容 |
+| 订单管理 | 订单同步、编辑、平台发货、补发卡密、仅确认发货及异常状态处理 |
+| AI 回复 | OpenAI 兼容 API、模型发现、完整连接链路测试、自定义提示词、议价轮次和让价范围控制 |
+| 数据看板 | 活跃账号、订单、营收、库存、商品销量与金额统计 |
+| 通知告警 | Bark、钉钉、飞书、企业微信、Telegram、邮件和自定义 Webhook |
+| 数据存储 | SQLite、MySQL、PostgreSQL，内置按方言执行的 Goose 数据库迁移 |
+| 安全能力 | 管理端会话、敏感字段 AES-256-GCM 加密、日志脱敏和出站地址校验 |
+| 容器部署 | PostgreSQL 17、健康检查、持久化卷、GHCR amd64/arm64 多架构镜像 |
+
+## 系统架构
+
+```mermaid
+flowchart LR
+    UI["React 管理后台"] --> API["Go / chi HTTP API"]
+    API --> Store["SQLite / MySQL / PostgreSQL"]
+    API --> Manager["账号管理器"]
+    Manager --> Engine["单账号运行时"]
+    Engine --> WS["闲鱼 WebSocket"]
+    Engine --> MTOP["闲鱼 MTOP"]
+    Engine --> Automation["自动化中心"]
+    Automation --> Notify["通知渠道"]
+    Engine -. "浏览器能力" .-> Chromium["Playwright / Chromium"]
+```
+
+核心职责划分：
+
+- `internal/composition`：唯一生产组合根，装配应用服务与生命周期组件
+- `internal/application`：用例编排、所有权校验、事务边界与补偿
+- `internal/xianyu`：登录协议、Cookie、MTOP、WebSocket 和消息协议
+- `internal/engine`：单账号生命周期、消息处理、回复与交付行为
+- `internal/automation`：发货、评价赠品、求评价和任务调度
+- `internal/browser`：Chromium 自动化、浏览器指纹读取与 token 滑块等浏览器相关能力
+- `internal/db`：多数据库访问、敏感字段加密和嵌入式迁移
+- `internal/server`：HTTP/SPA transport、管理端鉴权和前端静态资源
+
+## 页面预览
+
+![Ydisks闲鱼助手预览](https://raw.githubusercontent.com/Christ9038/Ydisks-Xianyu-Helper/main/docs/img/preview_account.png)
+
+![Ydisks闲鱼助手预览](https://raw.githubusercontent.com/Christ9038/Ydisks-Xianyu-Helper/main/docs/img/preview_im.png)
+
+
+![Ydisks闲鱼助手预览](https://raw.githubusercontent.com/Christ9038/Ydisks-Xianyu-Helper/main/docs/img/preview_auto.png)
+
+
+## 快速开始
+
+### 方式一：Docker Compose（推荐）
+
+适用于 Linux x86_64、Linux ARM64 和 Apple Silicon。需要 Docker Engine 或
+Docker Desktop，并使用 Docker Compose v2。
+
+Docker 部署会使用容器内 Chromium 的原生 Linux 指纹执行官网静默续期；续期是否成功由闲鱼响应决定，不会因宿主系统是 Linux 而跳过。
+
+```bash
+git clone https://github.com/Christ9038/Ydisks-Xianyu-Helper.git
+cd Ydisks-Xianyu-Helper
+cp .env.example .env
+```
+
+编辑 `.env`，至少修改以下配置：
+
+```dotenv
+POSTGRES_DB=xianyu
+POSTGRES_USER=xianyu
+POSTGRES_PASSWORD=替换为高强度密码
+DATABASE_URL=postgres://xianyu:替换为URL编码后的数据库密码@postgres:5432/xianyu?sslmode=disable
+XIANYU_DATA_KEY=替换为长期固定的随机密钥
+XIANYU_ADMIN_PASSWORD=替换为管理员密码
+```
+
+推荐使用以下命令生成随机值：
+
+```bash
+openssl rand -hex 24       # 适合作为 POSTGRES_PASSWORD，连接串无需额外 URL 编码
+openssl rand -base64 48    # 适合作为 XIANYU_DATA_KEY
+```
+
+配置完成后，只需一条命令即可拉取 GHCR 镜像、启动 PostgreSQL，并在首次部署时自动创建
+管理员：
+
+```bash
+docker compose up -d
+```
+
+浏览器访问 `http://localhost:59188`，使用用户名 `admin` 和 `.env` 中的
+`XIANYU_ADMIN_PASSWORD` 登录。
+
+> GHCR 镜像公开时可以匿名拉取。若镜像仍为私有，请先执行
+> `docker login ghcr.io -u Christ9038`，并使用具有 `read:packages` 权限的
+> Personal Access Token 登录。
+
+### 方式二：从源码运行
+
+环境要求：
+
+- Go 1.26.4 或兼容版本
+- Node.js 24 与 npm
+- Chromium 运行所需的系统依赖
+- 默认可直接使用 SQLite，无需额外数据库服务
+
+构建前端：
+
+```bash
+git clone https://github.com/Christ9038/Ydisks-Xianyu-Helper.git
+cd Ydisks-Xianyu-Helper
+npm --prefix frontend ci
+npm --prefix frontend run build
+```
+
+前端资源会在构建时通过 Go 的 `//go:embed` 嵌入服务；如果服务已经在运行，构建完成后
+需要重启 Go 服务，浏览器硬刷新本身不会替换运行中进程已加载的前端资源。
+
+### 方式三：桌面端安装包
+
+桌面端由两个进程组成：后台 `xianyu-server` 负责 HTTP API、账号运行时和 Chromium；
+`xianyu-tray` 只负责 Windows 托盘或 macOS 菜单栏状态、打开管理页面、打开日志目录和服务控制。
+Chromium 不打进 Go 二进制，但 Linux、Windows 和 macOS 独立安装包会内置对应架构的
+Playwright driver 与 Chromium runtime，安装后无需用户再下载浏览器。
+
+- Windows：安装器注册 `YdisksXianyuHelper` Windows Service，并将托盘控制器加入当前用户登录启动项。安装阶段会为交互式登录用户授予该服务的状态查询、启动和停止权限；安装完成后从托盘启动、停止、重启或退出服务不再触发 UAC，也不会获得修改或删除服务的权限。
+- macOS：安装器注册当前登录用户的两个 LaunchAgent，分别运行后台服务和菜单栏控制器。
+- Linux：下载对应架构的 tar 包后，以 root 执行 `./install.sh`；安装包已经包含对应架构的
+  Playwright driver 与 Chromium，脚本只通过 Playwright 安装系统依赖，不会再下载浏览器。
+  脚本创建专用系统用户并安装 systemd unit。安装完成后打开管理页面，首次设置管理员密码。
+  卸载时执行 `./uninstall.sh`，
+  默认保留 `/var/lib/ydisks-xianyu-helper` 数据。
+
+桌面端安装后的固定位置和服务标识如下：
+
+| 平台 | 后台服务 | 托盘/菜单栏程序 | 数据与日志 |
+| --- | --- | --- | --- |
+| Windows | `YdisksXianyuHelper` Windows Service | 当前用户登录启动的 `xianyu-tray.exe` | `C:\ProgramData\YdisksXianyuHelper\data`、`C:\ProgramData\YdisksXianyuHelper\logs` |
+| macOS | `com.ydisks.xianyu-helper.server` LaunchAgent | `Ydisks闲鱼助手.app` 内的菜单栏程序 | `~/Library/Application Support/YdisksXianyuHelper`、`~/Library/Logs/YdisksXianyuHelper` |
+| Linux | `ydisks-xianyu-helper.service` systemd unit | 无桌面托盘 | `/var/lib/ydisks-xianyu-helper`、`/var/log/ydisks-xianyu-helper` |
+
+Windows 和 macOS 托盘启动时会自动启动后台服务，并显示检查中、启动中、运行正常、正在停止
+等状态。选择“退出托盘”时，只有确认后台服务已经停止后托盘才会退出；“打开日志目录”可直接
+打开日志位置。Windows 安装阶段会为交互式登录用户授予当前服务的查询、启动和停止权限，
+安装完成后托盘控制服务不需要重复确认 UAC；修改服务配置或删除服务仍需管理员权限。
+
+托盘菜单中的“退出托盘”会先停止后台服务，再退出托盘程序；“打开日志目录”可直接打开当前平台的日志目录：Windows
+为 `C:\ProgramData\YdisksXianyuHelper\logs`，macOS 为
+`~/Library/Logs/YdisksXianyuHelper`。Linux 服务日志同时写入
+`/var/log/ydisks-xianyu-helper/server.log`，也可以使用
+`journalctl -u ydisks-xianyu-helper.service` 查看。
+
+桌面端安装包由 `.github/workflows/desktop-cd.yml` 在 `dev` 分支上持续构建；正式版本由统一的
+`.github/workflows/release.yml` 在 `v1.2.3` 格式的版本标签上协调构建：
+Linux 上传 amd64/arm64 tar 包，Windows 上传安装器，macOS 分别上传 arm64 和 amd64 安装包。
+分支构建只保留非正式 Actions artifacts；版本标签必须指向 `main` 中的提交，全部桌面端和 Docker
+构建验证成功后等待 `production-release` Environment 人工审批，审批通过才创建 GitHub Release、
+上传各平台安装包及 `SHA256SUMS`，并发布正式 Docker 标签。Windows
+和 macOS 安装包使用工作流中配置的固定签名证书签名；未配置对应 GitHub Secrets 时，签名
+步骤会失败，不会生成可分发的安装包。当前仓库未配置正式签名证书时，Windows/macOS 正式发布
+会停在签名步骤；Linux 安装包不依赖桌面端签名证书。
+
+GitHub Release 正文使用正式标签所指向提交的短 SHA 和完整 Git commit message（主题和正文），不会展开
+标签之间的全部历史提交。重跑同名标签时会同步更新正文并覆盖发布附件，不会使用 GitHub 自动生成的
+PR 分类说明。
+
+Linux 安装包的 `install.sh` 必须在与安装包相同架构的 Linux 主机上以 root 执行。安装包已经
+包含对应架构的 Playwright driver、Chromium 和 headless shell；安装时只安装 Chromium 所需
+系统库，不会从 Debian 仓库重新安装 Chromium。
+
+本地 macOS 打包必须先构建嵌入式前端和三个随包分发的可执行文件；`build-pkg.sh` 在 runtime 缺失时会自动调用
+`prepare-runtime.sh`，不需要手工复制 Chromium、driver 或 headless shell：
+
+```bash
+npm ci --prefix frontend
+npm run build --prefix frontend
+mkdir -p dist/macos/arm64
+go build -trimpath -ldflags='-s -w' -o dist/macos/arm64/xianyu-server ./cmd/server
+go build -trimpath -ldflags='-s -w' -o dist/macos/arm64/browser-install ./cmd/browser-install
+go build -trimpath -ldflags='-s -w' -o dist/macos/arm64/xianyu-tray ./cmd/tray
+packaging/macos/build-pkg.sh 0.0.0-local "$PWD/dist/macos" arm64
+```
+
+`build-pkg.sh` 会自动复用 `~/Library/Caches/ms-playwright-go` 和
+`~/Library/Caches/ms-playwright` 中与当前 Playwright driver 匹配的 Chromium；缓存不完整时会明确报错，
+不会生成安装后无法启动服务的残缺安装包。Intel macOS 使用 `amd64` 参数，并需要本机已有对应 x64 runtime。
+本机没有签名身份时生成的是未签名 pkg，不可作为已签名分发包使用。
+
+桌面端首次启动：
+
+1. 安装对应平台的安装包。macOS 请选择 arm64（Apple Silicon）或 amd64（Intel）版本。
+2. 启动后台服务和托盘/菜单栏控制器。
+3. 打开托盘菜单中的管理页面，或访问 `http://127.0.0.1:59188`。
+4. 如果数据库尚未初始化，页面会要求设置并确认管理员密码；完成后会自动登录，管理员用户名为 `admin`。
+
+Linux 需要先安装并启动 systemd 服务：
+
+```bash
+sudo ./install.sh
+```
+
+然后访问 `http://127.0.0.1:59188` 完成首次初始化。
+
+Linux、Windows 和 macOS 桌面安装包固定使用网页初始化：启动服务后打开
+`http://127.0.0.1:59188`，在“首次设置管理员密码”页面输入并确认不少于 8 个字符的密码，
+系统会创建 `admin` 并自动登录。源码运行的默认地址是 `:59188`，访问地址取决于传入的 `-addr`；
+例如本文的 `-addr :59188` 示例可通过本机地址访问，但也会监听全部接口。只有 Docker Compose 使用 `.env` 中的
+`XIANYU_ADMIN_PASSWORD` 做非交互初始化；CLI 方式仅用于无浏览器、自动化部署或重置密码。
+
+对于无浏览器环境、自动化部署或需要重置管理员密码的运维场景，仍可使用 CLI 初始化：
+
+```bash
+mkdir -p data
+go run ./cmd/server \
+  -init-admin \
+  -db data/xianyu_data.db \
+  -admin-password '请替换为管理员密码'
+```
+
+启动服务：
+
+```bash
+go run ./cmd/server -db data/xianyu_data.db -addr :59188
+```
+
+启动完成后访问 `http://localhost:59188`。如果数据库尚未初始化，直接在页面填写并确认
+管理员密码即可，不需要知道数据库文件路径，也不需要先执行 CLI 命令。
+
+> 安全提示：`-addr :59188` 会监听全部网络接口。未初始化数据库的首次网页初始化不要求预共享
+> secret，因此能够访问该端口的首个客户端可以创建管理员。该模式保留用于远程部署便利性，风险由
+> 部署者承担。公网或不可信网络必须在防火墙、反向代理或安全组中限制管理端口访问，并建议通过
+> `XIANYU_ADMIN_PASSWORD` 或 `-init-admin` 预先初始化。
+
+如当前环境无法安装 Chromium，可以使用 `-no-browser` 启动：
+
+```bash
+go run ./cmd/server -db data/xianyu_data.db -addr :59188 -no-browser
+```
+
+此模式仍可运行管理后台和不依赖 Chromium 的功能；浏览器指纹读取、token 滑块自动处理等浏览器相关能力不可用。
+
+## 初次使用
+
+1. 使用管理员账号登录管理后台。
+2. 进入“账号管理”，通过闲鱼 App 扫描二维码完成账号授权。
+3. 如平台触发风控，根据页面提示在手机端完成人脸或安全验证。
+4. 等待账号状态变为在线，再同步商品和订单。
+5. 在“卡密库存”创建交付内容。
+6. 在“自动化规则”将闲鱼商品与卡密、规格和触发条件关联。
+7. 在“在线聊天”按账号查看历史会话、发送文本/表情/图片；官方交易卡片和闲小蜜消息会以系统消息显示，不会进入普通用户回复链。
+8. 在“账号管理 → 自动评价与每日擦亮”按账号配置统一评价文案、评价开关和擦亮时间；确认测试账号行为后再启用。
+9. 如需处理砍价订单，在账号设置中单独打开“自动免拼”；它只控制“待刀成”阶段的免拼，不替代自动发货或自动确认发货开关。
+10. 按需配置关键词回复、默认回复、AI 回复和通知渠道。
+
+当前 Go 客户端支持扫码登录。不要把 Cookie、密码、二维码或人脸验证地址分享给不可信第三方。
+
+## 配置说明
+
+配置分为三层：进程环境变量、命令行参数和管理后台设置。数据库连接优先级为：
+
+```text
+DATABASE_URL > -db-url > -db
+```
+
+### 环境变量
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `DATABASE_URL` | 空 | 数据库连接 URL；生产环境推荐 PostgreSQL |
+| `XIANYU_DATA_KEY` | 空 | 敏感字段加密主密钥；生产环境必须固定并备份 |
+| `XIANYU_ADMIN_PASSWORD` | 空 | Docker Compose 非交互初始化或重置管理员时使用；源码和桌面端可通过首次打开页面设置密码 |
+| `XIANYU_UPLOAD_DIR` | `data/uploads` | 批量铺货上传文件与临时资源目录 |
+| `LOG_LEVEL` | 系统设置或 `info` | `debug`、`info`、`warn`、`error` |
+| `LOG_FORMAT` | 系统设置或 `text` | `text` 或 `json` |
+| `BROWSER_HEADLESS` | 按账号设置；Docker 为 `true` | 强制启用或关闭无头 Chromium |
+| `PLAYWRIGHT_DRIVER_PATH` | 自动发现 | Playwright driver 目录；可与安装包内 runtime 对应 |
+| `PLAYWRIGHT_BROWSERS_PATH` | 自动发现；Docker 为 `/ms-playwright` | Playwright Chromium runtime 目录 |
+| `PLAYWRIGHT_NODEJS_PATH` | 自动发现 | Playwright driver 使用的 Node.js 可执行文件 |
+| `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` | 自动发现 | 仅在需要强制使用外部 Chromium 时指定 |
+| `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD` | 源码 `false` / Docker `true` | 跳过下载 |
+| `PLAYWRIGHT_BROWSER_INSTALLER` | 自动发现 | runtime 缺失时使用的可取消 `browser-install` 入口；优先环境变量，其次服务同目录安装器，源码环境最后回退到模块内 `cmd/browser-install` |
+| `CAPTCHA_BROWSER_PROXY` | 空 | 仅 token CAPTCHA Chromium 使用的无凭证 `http(s)`、`socks4` 或 `socks5` 代理地址；非法或含凭证的值会被忽略 |
+| `CAPTCHA_IGNORE_CERT_ERRORS` | `false` | 仅受控 TLS 检查代理环境可设为 `true`；默认保持 Chromium 证书校验 |
+| `TZ` | 系统时区；Docker 为 `Asia/Shanghai` | 容器和日志时区 |
+| `XIANYU_PENDING_SHIP_CATCHUP` | 开启 | 待发货兜底扫描与断点续跑的止血开关；显式设为 `0` 时整体跳过 |
+| `XIANYU_CONTINUE_AFTER_UNCERTAIN` | 开启 | 消息动作结果不确定时是否放行后续幂等状态动作；显式设为 `0` 可恢复整链熔断 |
+
+前端构建还支持 `VITE_AMAP_JS_KEY`，用于覆盖发布页高德 JS API 的公开 Key；未设置时使用内置的公开 Key。修改后需重新执行 `make frontend` 才会写入嵌入式前端资源。
+
+### 待发货兜底扫描
+
+付款自动发货正常只由平台的付款系统消息（WebSocket 推送）触发。调度器每分钟扫描一次待发货订单，
+只在实时付款消息观察窗口结束后补触发没有任何 `order_paid` 运行的订单；同一订单两次兜底尝试至少间隔
+10 分钟，且复用正常自动化执行链。
+
+砍价订单必须已经持久化“免拼成功”或最终“我已成功小刀，待发货”阶段事实，兜底扫描不会调用免拼接口，
+也不会根据砍价标记猜测阶段。已有运行但未完成的订单会单独按检查点恢复，只有剩余动作全部是平台侧幂等的
+`confirm_shipment` 收尾动作时才会自动续跑；发卡或发送模板等外部消息动作不会被重复执行。
+
+每次恢复前都会重新核对运行来源、订单仍为 `pending_ship`、订单归属账号未变化、账号仍开启自动发货以及
+动作快照完整。订单已取消、完成或已发货时会停止旧运行；事实缺失、快照不一致或外部结果不确定时会停止
+自动重放并发送人工处理通知。把 `XIANYU_PENDING_SHIP_CATCHUP` 设为 `0` 可一次性关闭补触发和检查点续跑。
+
+Docker Compose 还支持：
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `COMPOSE_PROJECT_NAME` | `ydisks-xianyu-helper` | Compose 项目名及命名卷前缀 |
+| `POSTGRES_IMAGE` | `postgres:17-trixie` | PostgreSQL 镜像 |
+| `POSTGRES_DB` | 必填 | 数据库名 |
+| `POSTGRES_USER` | 必填 | 数据库用户 |
+| `POSTGRES_PASSWORD` | 必填 | 数据库密码 |
+| `XIANYU_IMAGE` | `ghcr.io/christ9038/ydisks-xianyu-helper:latest` | 应用镜像与标签 |
+| `XIANYU_BIND_ADDRESS` | `0.0.0.0` | 应用在宿主机上的绑定地址 |
+| `XIANYU_HTTP_PORT` | `59188` | 应用在宿主机上的端口 |
+
+默认 `compose.yml` 直接拉取 GHCR 的 `:latest` 多架构镜像；如需固定版本，请把
+`XIANYU_IMAGE` 设置为完整镜像地址，例如
+`ghcr.io/christ9038/ydisks-xianyu-helper:v1.2.3` 或
+`ghcr.io/christ9038/ydisks-xianyu-helper:sha-<完整提交号>`。
+
+`XIANYU_DATA_KEY` 用于加密 Cookie、账号密码、设备令牌、访问令牌、AI/SMTP 密钥和
+通知凭证。启用后，服务会自动升级历史明文数据。密钥丢失或更换后，已有加密数据将
+无法解密，因此必须与数据库备份一起保存。
+
+### 命令行参数
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `-db` | `data/xianyu_data.db` | SQLite 数据库路径 |
+| `-db-url` | 空 | `sqlite://`、`mysql://` 或 `postgres://` 连接 URL |
+| `-addr` | `:59188` | HTTP 监听地址 |
+| `-web` | 内嵌前端 | 外部前端静态资源目录，目录内需包含 `index.html` |
+| `-workdir` | 空 | 服务工作目录；桌面服务用它固定数据和浏览器目录 |
+| `-playwright-runtime-root` | 空 | 安装包随附的 Playwright runtime 根目录 |
+| `-playwright-driver-dir` | 空 | Playwright driver 目录，会设置为当前进程的 driver 路径 |
+| `-playwright-browser-dir` | 空 | Playwright 浏览器缓存目录，会设置为当前进程的 browser 路径 |
+| `-data-key-file` | 空 | `XIANYU_DATA_KEY` 持久化文件；文件不存在时自动生成 |
+| `-secure` | `false` | 为管理端 Cookie 添加 `Secure` 属性，HTTPS 部署应启用 |
+| `-no-browser` | `false` | 禁用 Chromium；浏览器指纹读取和 token 滑块自动处理不可用 |
+| `-log-level` | 环境变量或系统设置 | 覆盖日志等级 |
+| `-log-format` | 环境变量或系统设置 | 覆盖日志格式 |
+| `-v` | `false` | 启用调试日志，等价于未显式配置时使用 debug |
+| `-init-admin` | `false` | 初始化或重置 `admin` 后退出 |
+| `-ensure-admin` | `false` | 仅在 `admin` 不存在时初始化；已存在时不重置密码 |
+| `-admin-email` | `admin@example.com` | 初始化管理员邮箱 |
+| `-admin-password` | 空 | 初始化管理员密码 |
+| `-service` | `false` | Windows Service 模式运行 |
+| `-version` | `false` | 显示版本和构建信息后退出 |
+
+### 数据库连接示例
+
+```bash
+# SQLite
+DATABASE_URL="sqlite://data/xianyu_data.db" ./xianyu-server
+
+# MySQL；应用会强制补齐 multiStatements=true 和 clientFoundRows=true
+DATABASE_URL="mysql://user:pass@tcp(127.0.0.1:3306)/xianyu" ./xianyu-server
+
+# PostgreSQL
+DATABASE_URL="postgres://user:pass@127.0.0.1:5432/xianyu?sslmode=disable" ./xianyu-server
+```
+
+每次启动都会自动执行对应数据库方言的嵌入式 Goose 迁移。生产数据库升级前仍建议
+先完成备份。
+
+### 管理后台配置
+
+以下配置通过 Web 管理后台维护并保存在数据库中：
+
+- **账号设置**：启停状态、备注、通知渠道绑定、单账号 AI 回复策略和独立的自动免拼开关
+- **账号自动任务**：自动评价开关、统一好评文案（最多 500 个字符）、每日擦亮开关、北京时间执行时间和最近执行记录
+- **自动化规则**：触发条件、商品、规格、卡密组、发送数量、延迟和后续动作
+- **发货模板**：多条顺序消息、订单/买家/卡密/自定义变量；仅可用于付款发货或评价赠品
+- **回复规则**：关键词、文本或图片回复、默认回复及回复次数限制
+- **AI 设置**：OpenAI 兼容 API 地址、API Key、模型、全局提示词和“测试连接”
+- **议价策略**：最大折扣比例、最大折扣金额和最多议价轮次
+- **通知设置**：Bark、钉钉、飞书、企业微信、Telegram、邮件和 Webhook
+- **日志设置**：日志等级、输出格式和续期日志保留天数
+- **管理凭据**：管理员用户名、密码和邮箱
+
+AI Base URL 支持 OpenAI 兼容接口，可连接 OpenAI、通义千问、Ollama、vLLM、
+LocalAI 或兼容网关。只有在明确了解数据流向时才应向外部 AI 或远程验证服务传递
+消息内容与账号数据。
+
+## Docker 部署
+
+### 镜像与架构
+
+GitHub Actions 会将同一标签发布为多架构镜像：
+
+```text
+ghcr.io/christ9038/ydisks-xianyu-helper:latest
+├── linux/amd64
+└── linux/arm64
+```
+
+Docker 会根据宿主机 CPU 自动选择镜像。x86_64 Linux 拉取 amd64，Apple M 系列和
+ARM64 Linux 拉取 arm64，不需要手动设置 `platform`。
+
+标签规则：
+
+| Git 引用 | 镜像标签 |
+| --- | --- |
+| `dev` 分支 | `dev`、`sha-<完整提交号>` |
+| `v1.2.3` 标签 | `v1.2.3`、`1.2.3`、`1.2`、`latest`、`sha-<完整提交号>` |
+
+当前 Docker 工作流的分支 push 入口只有 `dev`；`dev` 是日常调试通道，生成 `dev` 和完整提交号 SHA 标签。
+`main` 不会触发该工作流的分支镜像构建，但仍是正式版本标签的基准分支。推送
+`v1.2.3` 格式的 Git 标签会触发统一正式发布流程。所有 Docker 发布都必须先通过 Go/前端测试，
+再对每个原生架构镜像实际启动 Chromium 和服务并通过 `/health` 检查；正式版还必须等全部桌面
+安装包构建成功并通过人工审批，之后才生成版本 manifest、更新 `latest` 并创建 GitHub Release。
+
+生产环境建议使用明确的版本标签或 SHA 标签，避免上游更新导致未经验证的自动升级。
+
+### Compose 服务
+
+根目录的 [`compose.yml`](compose.yml) 是默认生产部署文件：它只拉取 GHCR 镜像，完全不
+包含 `build` 配置，因此服务器不需要安装 Go、Node.js 或项目源码构建依赖。完成一次
+`.env` 配置后，始终使用：
+
+```bash
+docker compose up -d
+```
+
+它包含两个服务：
+
+| 服务 | 用途 |
+| --- | --- |
+| `postgres` | PostgreSQL 17 数据库，仅在 Compose 内部网络开放 5432 |
+| `app` | Ydisks闲鱼助手主服务、前端和 Chromium |
+
+`app` 会在首次启动时自动创建 `admin`；如果管理员已存在，后续 `up`、重启或升级均不会
+修改其密码。
+
+`docker-compose.debian13-postgres17.yml` 保留为**源码构建版**，用于本地修改 Dockerfile
+或需要构建本地镜像的场景；生产服务器无需使用该文件。
+
+持久化卷：
+
+| 卷 | 内容 |
+| --- | --- |
+| `postgres_data` | PostgreSQL 数据文件 |
+| `app_data` | 上传文件、批量铺货资源和应用数据 |
+| `browser_data` | Chromium 持久化配置和验证上下文 |
+
+### 完整部署步骤
+
+```bash
+git clone https://github.com/Christ9038/Ydisks-Xianyu-Helper.git
+cd Ydisks-Xianyu-Helper
+cp .env.example .env
+```
+
+完成 `.env` 配置后执行：
+
+```bash
+docker compose up -d
+```
+
+检查运行状态：
+
+```bash
+docker compose ps
+curl -fsS http://127.0.0.1:59188/health
+docker compose logs --tail=200 app
+```
+
+健康接口正常时返回（构建信息会随运行方式变化）：
+
+```json
+{"status":"ok","database":"ok","version":"dev","commit":"unknown","build_time":"unknown"}
+```
+
+正式安装包和 Docker 镜像会注入对应版本、提交号和构建时间；源码运行默认显示
+`dev`/`unknown`。管理后台侧边栏底部也会显示当前运行版本和短提交号。
+
+### 更新镜像
+
+```bash
+docker compose pull app
+docker compose up -d
+docker compose logs --tail=100 app
+```
+
+更新前请先备份数据库，并确认 `.env` 中的 `XIANYU_DATA_KEY` 未发生变化。
+
+### 备份 PostgreSQL
+
+```bash
+set -a
+. ./.env
+set +a
+
+docker compose exec -T postgres \
+  pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  > "xianyu-$(date +%Y%m%d-%H%M%S).sql"
+```
+
+恢复前请先停止应用，并在独立环境验证备份文件：
+
+```bash
+docker compose stop app
+docker compose exec -T postgres \
+  psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < xianyu-backup.sql
+```
+
+同时备份 `.env` 中的 `XIANYU_DATA_KEY`。不要把包含真实密码和密钥的 `.env` 提交到
+Git；项目已默认忽略该文件。
+
+### 停止服务
+
+```bash
+# 停止并保留数据卷
+docker compose down
+
+# 查看数据卷
+docker volume ls --filter name=xianyu
+```
+
+不要在生产环境随意执行 `down -v`，该参数会删除 Compose 管理的数据库和应用数据卷。
+
+### HTTPS 与反向代理
+
+生产环境建议使用 Caddy、Nginx、Traefik 或云负载均衡器终止 TLS，并避免直接向公网
+暴露管理端口。启用 HTTPS 后，应为应用命令增加 `-secure`，确保管理端会话 Cookie
+仅通过 HTTPS 发送。例如可创建一个 Compose override：
+
+```yaml
+services:
+  app:
+    command: ["/app/xianyu-server", "-addr", ":59188", "-secure"]
+```
+
+## 开发指南
+
+### 项目结构
+
+```text
+.
+├── cmd/
+│   ├── server/           # 主服务与管理员初始化入口
+│   ├── browser-install/   # Playwright Chromium 安装辅助程序
+│   ├── tray/              # Windows 托盘/macOS 菜单栏控制器
+│   ├── init-admin/       # 交互式管理员初始化工具
+│   ├── dbverify/         # 多数据库迁移和 CRUD 验证
+│   └── dbseed/           # Docker 功能测试数据种子
+├── internal/
+│   ├── account/          # 多账号监督与生命周期
+│   ├── application/      # 用例编排、事务与补偿
+│   ├── adapter/          # 业务模块接线层
+│   ├── automation/       # 自动化中心与调度器
+│   ├── browser/          # Chromium 自动化、指纹与 token 滑块能力
+│   ├── composition/      # 唯一生产组合根
+│   ├── db/               # 数据访问、加密与迁移
+│   ├── engine/           # 单账号消息和交付运行时
+│   ├── notify/           # 通知渠道
+│   ├── renewal/          # 登录态续期调度
+│   ├── server/           # HTTP API 与 SPA 服务
+│   └── xianyu/           # MTOP、WebSocket、登录和协议实现
+├── frontend/             # React、TypeScript、Vite 前端
+├── docs/                 # 专题文档和行为规范
+├── packaging/             # Linux systemd、Windows Inno Setup、macOS pkg
+├── scripts/              # Docker 与回归测试脚本
+└── Dockerfile.debian13   # 多阶段生产镜像
+```
+
+### 本地开发
+
+启动后端：
+
+```bash
+go run ./cmd/server -db data/xianyu_data.db -addr :59188
+```
+
+启动前端开发服务器：
+
+```bash
+npm --prefix frontend ci
+npm --prefix frontend run dev
+```
+
+访问 `http://localhost:3000`。Vite 会将 API 请求代理到 `http://localhost:59188`。
+
+构建嵌入式前端和 Go 二进制：
+
+```bash
+make frontend
+make build
+```
+
+### 质量检查
+
+```bash
+make fmt       # 格式化 Go 代码
+make vet       # go vet
+make lint      # golangci-lint
+make test      # 全部 Go 单元测试
+make cover     # 覆盖率报告
+make check     # fmt + architecture + API contract + vet + lint + test + comments
+
+npm --prefix frontend run typecheck
+npm --prefix frontend test
+npm --prefix frontend run build
+```
+
+完整 Docker 功能回归会检查前端、Go `-race`、SQLite、MySQL 8.4、PostgreSQL 17、
+API 功能和容器重启持久化：
+
+```bash
+./scripts/docker-full-test.sh
+```
+
+验证指定数据库的迁移与核心 CRUD：
+
+```bash
+go run ./cmd/dbverify "sqlite:///tmp/xianyu-verify.db"
+go run ./cmd/dbverify "mysql://root:pass@tcp(127.0.0.1:3306)/xianyu"
+go run ./cmd/dbverify "postgres://user:pass@127.0.0.1:5432/xianyu"
+```
+
+## 常见问题
+
+### 首次打开页面如何初始化管理员
+
+启动服务后访问管理页面。如果数据库中还没有管理员，页面会显示“首次设置管理员密码”，
+填写两次不少于 8 个字符的密码并提交即可。初始化成功后会自动登录，默认管理员用户名为
+`admin`。
+
+Docker Compose 使用非交互初始化，因此必须在 `.env` 中设置非空的
+`XIANYU_ADMIN_PASSWORD`，然后执行：
+
+```bash
+docker compose up -d
+```
+
+无浏览器、自动化部署或需要重置管理员密码时可执行：
+
+```bash
+go run ./cmd/server -init-admin -db data/xianyu_data.db -admin-password '新密码'
+```
+
+### PostgreSQL 连接失败
+
+- 确认 `.env` 中 `POSTGRES_DB`、`POSTGRES_USER`、`POSTGRES_PASSWORD` 与
+  `DATABASE_URL` 完全一致。
+- Compose 内部的数据库主机名必须写 `postgres`，不能写 `localhost`。
+- 密码包含 `@`、`:`、`/`、`#` 等字符时，需要在 `DATABASE_URL` 中进行 URL 编码。
+- 使用 `docker compose ... ps` 确认 PostgreSQL 健康检查已通过。
+
+### Chromium 或 Playwright 初始化失败
+
+- Docker 部署优先使用项目提供的镜像，镜像在构建阶段已下载并校验匹配架构的 Chromium runtime；
+  Docker CI 优先复用 GitHub Actions 缓存，不依赖 Debian 仓库中的 `chromium` 包。最终镜像基于
+  固定的 Node.js 24 slim 镜像，只通过 Playwright 安装 Chromium 所需动态库，并在同一镜像层清理
+  apt 索引和临时缓存；发布前会实际启动 Chromium 和服务进行门禁验证。
+- 独立安装包在 CI 构建阶段下载对应架构的 Playwright driver 和 Chromium；Linux 安装时只
+  安装系统库，不需要再次下载浏览器。
+- 源码运行时确认系统允许下载 Playwright 驱动和 Chromium。
+- 自带 Chromium 时设置 `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`，并按需设置
+  `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`。
+- 容器内需要足够的共享内存与可写的 `browser_data` 卷。
+
+### 账号掉线或需要安全验证
+
+- 查看“账号管理”中的状态和续期日志。
+- 根据页面二维码在闲鱼 App 完成人脸或安全验证。
+- 检查服务器时间、时区和外网连接是否正常。
+- 不要同时在多个实例中运行同一个闲鱼账号，避免凭证相互覆盖。
+- 若一直提示需要安全验证，请清除账号登录凭证，停用账号。登录闲鱼官方Web版，打开消息页面后，人工通过风控后等待一会儿后再尝试登录。
+
+### 修改 `XIANYU_DATA_KEY` 后无法读取凭证
+
+这是预期的安全行为。请恢复写入这些数据时使用的原密钥。无法恢复原密钥时，只能重新
+登录账号并重新录入受保护的密钥；不要通过清空或绕过解密检查继续运行生产数据库。
+
+## 安全建议
+
+- 仅通过 HTTPS 暴露管理后台，并限制可信来源访问。
+- 为管理员、数据库和 GHCR 分别使用不同的高强度密码。
+- 固定并离线备份 `XIANYU_DATA_KEY`，不要在多套环境之间随意复用。
+- 不要提交 `.env`、数据库文件、Cookie、二维码、日志或浏览器数据目录。
+- 定期备份 PostgreSQL，并实际验证恢复流程。
+- 使用版本或 SHA 镜像标签部署生产环境。
+- 仅向可信的 AI、SMTP、Webhook 发送数据。
+- 发现账号异常时先停用账号，再检查登录审计和续期日志。
+
+## 贡献
+
+欢迎通过 [Issue 模板](.github/ISSUE_TEMPLATE/) 报告可复现的问题，或按照
+[贡献指南](CONTRIBUTING.md) 通过 Pull Request 提交改进。参与项目时请遵守
+[行为准则](CODE_OF_CONDUCT.md)。提交前请：
+
+1. 将不同主题拆分为独立提交。
+2. 为协议、数据库和关键业务行为补充测试。
+3. 运行 `make check` 和前端测试。
+4. 不要提交真实账号、Cookie、订单、卡密、密钥或其他敏感数据。
+
+提交安全问题时，请先阅读[安全策略](SECURITY.md)，避免在公开 Issue 中附带真实凭证或用户数据。
+
+## 开源协议
+
+本项目采用 [Apache License 2.0](LICENSE) 开源，版权所有 © 2026 Christ9038。
+
+完整许可条款见 [LICENSE](LICENSE)，
+原项目名称、版权与署名声明见 [NOTICE](NOTICE)。分发原始或衍生作品时，请保留这两个
+文件中的适用声明，并在修改过的文件中显著标注修改。
+
+## 免责声明
+
+本项目仅提供技术研究和自托管管理能力，不保证对闲鱼接口变化、账号风控策略、业务
+连续性或数据完整性的长期兼容。因使用本项目造成的账号限制、交易纠纷、数据损失或
+其他直接与间接损失，应由使用者自行承担。请勿将本项目用于垃圾消息、欺诈、未授权
+访问、规避平台限制或任何违法违规活动。
+
+## 社区支持
+
+本项目受到 LINUX DO 社区的交流与反馈支持：
+
+[访问 LINUX DO 社区](https://linux.do/)

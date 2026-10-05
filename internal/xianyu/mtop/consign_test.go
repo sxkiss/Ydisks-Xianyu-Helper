@@ -1,0 +1,338 @@
+package mtop
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+// consignCookies 用于本次流程后续判断的consignCookies
+const consignCookies = "unb=123; _m_h5_tk=token_1;"
+
+// TestConsignSuccess: ret SUCCESS 直接成功，无需重试。
+func TestConsignSuccess(t *testing.T) {
+	// requests 用于本次流程后续判断的请求列表
+	var requests atomic.Int32
+	// server 用于本次流程后续判断的server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		fmt.Fprint(w, `{"ret":["SUCCESS::调用成功"]}`)
+	}))
+	defer server.Close()
+
+	// client 用于本次流程后续判断的client
+	client := &ClientImpl{HTTPClient: server.Client(), ConsignURL: server.URL + "/"}
+	// ok、ret、updated、err 用于本次流程后续判断的ok、ret、updated、err
+	ok, ret, updated, err := client.ConsignContext(context.Background(), consignCookies, "order-1")
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if !ok || len(ret) == 0 || !strings.Contains(ret[0], "SUCCESS") {
+		t.Fatalf("ok=%v ret=%v", ok, ret)
+	}
+	if updated != consignCookies {
+		t.Fatalf("无 Set-Cookie 时 updated 应保持原样: %q", updated)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("requests=%d want 1", requests.Load())
+	}
+}
+
+// TestConsignWithDeliveryContentWritesProof 验证确认发货请求会携带已发送的文本和图片凭证。
+func TestConsignWithDeliveryContentWritesProof(t *testing.T) {
+	// server 用于读取测试请求中的 consign 数据。
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// parseErr 保存请求表单解析错误。
+		if parseErr := r.ParseForm(); parseErr != nil {
+			t.Fatalf("解析请求表单失败: %v", parseErr)
+		}
+		// payload 保存确认发货接口的 JSON 凭证载荷。
+		var payload struct {
+			TradeText string   `json:"tradeText"`
+			PicList   []string `json:"picList"`
+		}
+		// unmarshalErr 表示测试请求中的确认发货数据无法解析。
+		if unmarshalErr := json.Unmarshal([]byte(r.FormValue("data")), &payload); unmarshalErr != nil {
+			t.Fatalf("解析 consign 数据失败: %v", unmarshalErr)
+		}
+		if payload.TradeText != "卡密\"A" || len(payload.PicList) != 1 || payload.PicList[0] != "https://img.example/proof.png" {
+			t.Fatalf("确认发货凭证错误: %+v", payload)
+		}
+		fmt.Fprint(w, `{"ret":["SUCCESS::调用成功"]}`)
+	}))
+	defer server.Close()
+
+	// client 保存注入本地测试端点的 MTOP 客户端。
+	client := &ClientImpl{HTTPClient: server.Client(), ConsignURL: server.URL + "/"}
+	// ok、ret、_, err 保存带凭证确认发货的调用结果。
+	ok, ret, _, err := client.ConsignContextWithDelivery(context.Background(), consignCookies, "order-1", "卡密\"A", []string{"https://img.example/proof.png"})
+	if err != nil || !ok || len(ret) == 0 {
+		t.Fatalf("ok=%v ret=%v err=%v", ok, ret, err)
+	}
+}
+
+// TestConsignWrapper: Consign（无 Context）等价于 ConsignContext。
+func TestConsignWrapper(t *testing.T) {
+	// server 用于本次流程后续判断的server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"ret":["SUCCESS::调用成功"]}`)
+	}))
+	defer server.Close()
+
+	// client 用于本次流程后续判断的client
+	client := &ClientImpl{HTTPClient: server.Client(), ConsignURL: server.URL + "/"}
+	// ok、ret、err 用于本次流程后续判断的ok、ret、err
+	ok, ret, _, err := client.Consign(consignCookies, "order-1")
+	if err != nil || !ok || len(ret) == 0 {
+		t.Fatalf("ok=%v ret=%v err=%v", ok, ret, err)
+	}
+}
+
+// TestConsignRetFailure: 普通业务失败由 ok/ret 表达，不应被误判为远端执行不确定。
+func TestConsignRetFailure(t *testing.T) {
+	// requests 用于本次流程后续判断的请求列表
+	var requests atomic.Int32
+	// server 用于本次流程后续判断的server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		fmt.Fprint(w, `{"ret":["FAIL_BIZ_ORDER_STATUS_ERROR::订单状态错误"]}`)
+	}))
+	defer server.Close()
+
+	// client 用于本次流程后续判断的client
+	client := &ClientImpl{HTTPClient: server.Client(), ConsignURL: server.URL + "/"}
+	// ok、ret、err 用于本次流程后续判断的ok、ret、err
+	ok, ret, _, err := client.ConsignContext(context.Background(), consignCookies, "order-1")
+	if err != nil || ok || len(ret) == 0 || !strings.Contains(ret[0], "订单状态错误") {
+		t.Fatalf("ok=%v ret=%v err=%v", ok, ret, err)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("requests=%d want 1（非 token 过期不应重试）", requests.Load())
+	}
+}
+
+// TestConsignBusinessFailureOnNon2xxPreservesDeterministicResult 验证有效 MTOP 业务错误不因 HTTP 状态而变成不确定动作。
+func TestConsignBusinessFailureOnNon2xxPreservesDeterministicResult(t *testing.T) {
+	// server 返回带业务 ret 的非 2xx 响应，模拟平台网关状态与 MTOP 业务结果并存的情况。
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"ret":["FAIL_BIZ_ORDER_STATUS_ERROR::订单状态错误"]}`)
+	}))
+	defer server.Close()
+
+	// client 保存注入本地测试端点的 MTOP 客户端。
+	client := &ClientImpl{HTTPClient: server.Client(), ConsignURL: server.URL + "/"}
+	// ok、ret、updated、err 保存确认发货的确定性业务结果。
+	ok, ret, updated, err := client.ConsignContext(context.Background(), consignCookies, "order-1")
+	if err != nil || ok || len(ret) == 0 || !strings.Contains(ret[0], "订单状态错误") {
+		t.Fatalf("ok=%v ret=%v updated=%q err=%v", ok, ret, updated, err)
+	}
+}
+
+// TestConsignMergesSetCookie: 成功响应里的 Set-Cookie 应合并进 updated。
+func TestConsignMergesSetCookie(t *testing.T) {
+	// server 用于本次流程后续判断的server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "_m_h5_tk", Value: "fresh_token", Path: "/"})
+		http.SetCookie(w, &http.Cookie{Name: "extra", Value: "v", Path: "/"})
+		fmt.Fprint(w, `{"ret":["SUCCESS::调用成功"]}`)
+	}))
+	defer server.Close()
+
+	// client 用于本次流程后续判断的client
+	client := &ClientImpl{HTTPClient: server.Client(), ConsignURL: server.URL + "/"}
+	// updated、err 用于本次流程后续判断的updated、err
+	_, _, updated, err := client.ConsignContext(context.Background(), consignCookies, "order-1")
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if !strings.Contains(updated, "_m_h5_tk=fresh_token") || !strings.Contains(updated, "extra=v") {
+		t.Fatalf("updated=%q 应含两个合并后的 Cookie", updated)
+	}
+}
+
+// TestConsignRequestError: 网络错误直接返回 err。
+func TestConsignRequestError(t *testing.T) {
+	// server 用于本次流程后续判断的server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	server.Close()
+
+	// client 用于本次流程后续判断的client
+	client := &ClientImpl{HTTPClient: server.Client(), ConsignURL: server.URL + "/"}
+	// err 用于本次流程后续判断的err
+	_, _, _, err := client.ConsignContext(context.Background(), consignCookies, "order-1")
+	if err == nil || !strings.Contains(err.Error(), "consign 请求失败") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+// TestConsignParseFailure: 响应非 JSON 解析失败。
+func TestConsignParseFailure(t *testing.T) {
+	// server 用于本次流程后续判断的server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `not-json{`)
+	}))
+	defer server.Close()
+
+	// client 用于本次流程后续判断的client
+	client := &ClientImpl{HTTPClient: server.Client(), ConsignURL: server.URL + "/"}
+	// err 用于本次流程后续判断的err
+	_, _, _, err := client.ConsignContext(context.Background(), consignCookies, "order-1")
+	if err == nil || !strings.Contains(err.Error(), "解析确认发货响应失败") || !strings.Contains(err.Error(), "JSON 解析失败") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+// TestConsignTokenExpiredNoCookieRefreshFails: token 过期且响应无 Set-Cookie 时，
+// 会调用 RefreshTokenContext 刷新；内部耗尽仍保留 Token 失败，不升级为 Session。
+// TestConsignTokenExpiredNoCookieRefreshFails 封装TestConsign令牌ExpiredNo登录凭证RefreshFails业务协调。
+func TestConsignTokenExpiredNoCookieRefreshFails(t *testing.T) {
+	// requests 用于本次流程后续判断的请求列表
+	var requests atomic.Int32
+	// server 用于本次流程后续判断的server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		// token 过期，但不 Set-Cookie
+		fmt.Fprint(w, `{"ret":["FAIL_SYS_TOKEN_EXOIRED::令牌过期"]}`)
+	}))
+	defer server.Close()
+
+	// client 用于本次流程后续判断的client
+	client := &ClientImpl{HTTPClient: server.Client(), ConsignURL: server.URL + "/", TokenURL: server.URL + "/"}
+	// err 保存内部刷新耗尽的 Token 错误，不能被上层识别为 Session 失效。
+	_, _, _, err := client.ConsignContext(context.Background(), consignCookies, "order-1")
+	if err == nil {
+		t.Fatalf("expected err, got nil")
+	}
+	// 保留刷新失败包装和精确分类；一次业务请求加五次内部 Token 请求后停止。
+	if !strings.Contains(err.Error(), "consign token 过期且刷新失败") || !IsMTopTokenExpiredErr(err) || IsSessionExpiredErr(err) || requests.Load() != 1+officialMTopMaxAttempts {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+// TestConsignTokenExpiredThenRefreshSucceeds: token 过期无 Set-Cookie，
+// 但 RefreshToken 刷新成功（返回新 Cookie），第二次 consign 成功。
+// TestConsignTokenExpiredThenRefreshSucceeds 封装TestConsign令牌ExpiredThenRefreshSucceeds业务协调。
+func TestConsignTokenExpiredThenRefreshSucceeds(t *testing.T) {
+	// consignReqs 用于本次流程后续判断的consignReqs
+	var consignReqs atomic.Int32
+	// tokenReqs 用于本次流程后续判断的令牌Reqs
+	var tokenReqs atomic.Int32
+	// server 用于本次流程后续判断的server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 通过 URL 路径区分 consign / token 请求
+		if strings.Contains(r.URL.Path, "token") || r.URL.Query().Get("api") == "mtop.taobao.idlemessage.pc.login.token" {
+			tokenReqs.Add(1)
+			// token 接口返回成功并下发新 Cookie
+			http.SetCookie(w, &http.Cookie{Name: "_m_h5_tk", Value: "refreshtoken_42", Path: "/"})
+			fmt.Fprint(w, `{"ret":["SUCCESS::调用成功"],"data":{"accessToken":"access-1"}}`)
+			return
+		}
+		// consign
+		// attempt 用于本次流程后续判断的尝试次数
+		attempt := consignReqs.Add(1)
+		if attempt == 1 {
+			// token 过期，不 Set-Cookie（强制走 RefreshToken）
+			fmt.Fprint(w, `{"ret":["FAIL_SYS_TOKEN_EXOIRED::令牌过期"]}`)
+			return
+		}
+		fmt.Fprint(w, `{"ret":["SUCCESS::调用成功"]}`)
+	}))
+	defer server.Close()
+
+	// client 用于本次流程后续判断的client
+	client := &ClientImpl{HTTPClient: server.Client(), ConsignURL: server.URL + "/c", TokenURL: server.URL + "/t"}
+	// ctx、cancel 用于本次流程后续判断的ctx、cancel
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// ok、updated、err 用于本次流程后续判断的ok、updated、err
+	ok, _, updated, err := client.ConsignContext(ctx, consignCookies, "order-1")
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if !ok {
+		t.Fatalf("ok=false want true")
+	}
+	if consignReqs.Load() != 2 || tokenReqs.Load() != 1 {
+		t.Fatalf("应只刷新一次 Token 后重试原业务: consign=%d token=%d", consignReqs.Load(), tokenReqs.Load())
+	}
+	if !strings.Contains(updated, "refreshtoken_42") {
+		t.Fatalf("updated=%q 应含刷新后的 token", updated)
+	}
+}
+
+// TestConsignContextCanceled: ctx 取消应中止重试。
+func TestConsignContextCanceled(t *testing.T) {
+	// requests 用于本次流程后续判断的请求列表
+	var requests atomic.Int32
+	// server 用于本次流程后续判断的server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		// 不 Set-Cookie，触发 RefreshToken 重试路径
+		fmt.Fprint(w, `{"ret":["FAIL_SYS_TOKEN_EXOIRED::令牌过期"]}`)
+	}))
+	defer server.Close()
+
+	// client 用于本次流程后续判断的client
+	client := &ClientImpl{HTTPClient: server.Client(), ConsignURL: server.URL + "/", TokenURL: server.URL + "/"}
+	// ctx、cancel 用于本次流程后续判断的ctx、cancel
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 已取消
+	_, _, _, err := client.ConsignContext(ctx, consignCookies, "order-1")
+	if err == nil {
+		t.Fatalf("expected err")
+	}
+	// ctx 取消可能从 sleepCtx 或 RefreshToken 路径返回
+	if !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "context canceled") {
+		t.Fatalf("err=%v want context.Canceled", err)
+	}
+}
+
+// TestConsignRetryExhausted: token 过期但每次下发不同 Set-Cookie，4 次重试耗尽返回明确错误。
+func TestConsignRetryExhausted(t *testing.T) {
+	// requests 用于本次流程后续判断的请求列表
+	var requests atomic.Int32
+	// server 用于本次流程后续判断的server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// n 用于本次流程后续判断的n
+		n := requests.Add(1)
+		http.SetCookie(w, &http.Cookie{Name: "_m_h5_tk", Value: fmt.Sprintf("tok_%d", n), Path: "/"})
+		fmt.Fprint(w, `{"ret":["FAIL_SYS_TOKEN_EXOIRED::令牌过期"]}`)
+	}))
+	defer server.Close()
+
+	// client 用于本次流程后续判断的client
+	client := &ClientImpl{HTTPClient: server.Client(), ConsignURL: server.URL + "/"}
+	// ctx、cancel 用于本次流程后续判断的ctx、cancel
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	// ok、ret、err 用于本次流程后续判断的ok、ret、err
+	ok, ret, _, err := client.ConsignContext(ctx, consignCookies, "order-1")
+	if err == nil || ok || !strings.Contains(err.Error(), "Token 重试失败") {
+		t.Fatalf("ok=%v err=%v want ok=false and token retry error", ok, err)
+	}
+	if len(ret) == 0 || !strings.Contains(ret[0], "FAIL_SYS_TOKEN_EXOIRED") {
+		t.Fatalf("ret=%v", ret)
+	}
+	if requests.Load() != 4 {
+		t.Fatalf("requests=%d want 4", requests.Load())
+	}
+}
+
+// TestBuildConsignQuery: 验证 query 拼接顺序与字段。
+func TestBuildConsignQuery(t *testing.T) {
+	// q 用于本次流程后续判断的q
+	q := buildConsignQuery("123", "SIGN")
+	if !strings.Contains(q, "t=123") || !strings.Contains(q, "sign=SIGN") ||
+		!strings.Contains(q, "api=mtop.taobao.idle.logistic.consign.dummy") ||
+		!strings.Contains(q, "v=1.0") {
+		t.Fatalf("query=%q 缺字段", q)
+	}
+}

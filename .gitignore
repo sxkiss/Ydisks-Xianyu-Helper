@@ -1,0 +1,53 @@
+# Build outputs
+/server
+/xianyu-server
+/xianyu-init-admin
+/init-admin
+*.exe
+*.test
+!/Dockerfile.test
+*.out
+/cmd/server/rsrc_windows_amd64.syso
+/cmd/tray/rsrc_windows_amd64.syso
+
+# Local deployment environment (keep secrets out of Git)
+/.env
+/.env.*
+!/.env.example
+
+# Runtime data
+/data/
+/browser_data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Uploads / temporary files
+/uploads/
+/tmp/
+*.log
+
+# Frontend dependencies
+/frontend/node_modules/
+/frontend/coverage/
+/frontend/.env.local
+/frontend/.env.*.local
+/internal/server/data/
+
+# Embedded frontend build assets (index.html references hashed files, so JS/CSS must be tracked)
+/internal/webui/static/assets/
+!/internal/webui/static/assets/
+!/internal/webui/static/assets/*.css
+!/internal/webui/static/assets/*.js
+!/internal/webui/static/assets/*.svg
+/internal/webui/static/assets/*.map
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Docker 构建期运行时缓存（含 Chromium 等大体积二进制，不入库）
+/.docker/

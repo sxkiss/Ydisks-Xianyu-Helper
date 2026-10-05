@@ -1,0 +1,360 @@
+package db
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/go-sql-driver/mysql"
+	"github.com/jackc/pgx/v5/pgconn"
+)
+
+// ErrNotFound 未找到记录。
+var ErrNotFound = errors.New("记录不存在")
+
+// ErrUsernameTaken 表示目标用户名已被其他用户占用。
+var ErrUsernameTaken = errors.New("用户名已存在")
+
+// ErrForbidden 表示资源存在但不属于当前用户。
+var ErrForbidden = errors.New("无权限操作资源")
+
+// ErrStaleLogin 表示密码校验快照已被新的认证代次取代。
+var ErrStaleLogin = errors.New("认证代次已变更")
+
+// Users 用户相关查询。所有方法都直接接受 *sql.DB，由调用方控制事务边界。
+type Users struct {
+	DB *sql.DB
+}
+
+// IsSystemInitialized 系统是否已初始化（至少存在 admin 用户）。
+// IsSystemInitialized 判断系统是否已有管理员账号。
+// IsSystemInitialized 封装Is系统Initialized业务协调。
+func (u *Users) IsSystemInitialized(ctx context.Context) (bool, error) {
+	// exists 用于本次流程后续判断的exists
+	var exists bool
+	// err 用于本次流程后续判断的err
+	err := u.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE is_admin=1)`).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("检查系统初始化: %w", err)
+	}
+	return exists, nil
+}
+
+// GetAdmin 返回首个管理员账号。
+func (u *Users) GetAdmin(ctx context.Context) (*User, error) {
+	return u.scanUser(ctx, `SELECT id, username, email, password_hash, is_active, is_admin, auth_version, created_at, updated_at
+		FROM users WHERE is_admin=1 ORDER BY id LIMIT 1`)
+}
+
+// Create 创建用户，密码用 bcrypt 哈希。
+// 用户名或邮箱重复时返回 false。
+// Create 创建当前值。
+func (u *Users) Create(ctx context.Context, username, email, plainPassword string) (bool, error) {
+	// hash、err 用于本次流程后续判断的hash、err
+	hash, err := HashPassword(plainPassword)
+	if err != nil {
+		return false, fmt.Errorf("哈希密码: %w", err)
+	}
+	// res、err 用于本次流程后续判断的res、err
+	res, err := u.DB.ExecContext(ctx,
+		`INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?)`,
+		username, email, hash)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("创建用户: %w", err)
+	}
+	// n 用于本次流程后续判断的n
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// isUniqueViolation 封装isUniqueViolation业务协调。
+func isUniqueViolation(err error) bool {
+	// mysqlErr 用于本次流程后续判断的mysqlErr
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) {
+		return mysqlErr.Number == 1062
+	}
+	// pgErr 用于本次流程后续判断的pgErr
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "23505"
+	}
+	// message 用于本次流程后续判断的消息
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "unique constraint") || strings.Contains(message, "constraint failed")
+}
+
+// GetByUsername 按用户名查询。
+func (u *Users) GetByUsername(ctx context.Context, username string) (*User, error) {
+	return u.scanUser(ctx, `SELECT id, username, email, password_hash, is_active, is_admin, auth_version, created_at, updated_at
+		FROM users WHERE username = ?`, username)
+}
+
+// GetByEmail 按邮箱查询。
+func (u *Users) GetByEmail(ctx context.Context, email string) (*User, error) {
+	return u.scanUser(ctx, `SELECT id, username, email, password_hash, is_active, is_admin, auth_version, created_at, updated_at
+		FROM users WHERE email = ?`, email)
+}
+
+// GetByID 按 ID 查询。
+func (u *Users) GetByID(ctx context.Context, id int64) (*User, error) {
+	return u.scanUser(ctx, `SELECT id, username, email, password_hash, is_active, is_admin, auth_version, created_at, updated_at
+		FROM users WHERE id = ?`, id)
+}
+
+// VerifyAndUpgrade 验证密码；若命中老 SHA-256 哈希则静默升级到 bcrypt。
+// 返回 (user, ok)。ok=false 表示密码错误或用户不存在/未激活。
+// VerifyAndUpgrade 封装VerifyAndUpgrade业务协调。
+func (u *Users) VerifyAndUpgrade(ctx context.Context, username, plainPassword string) (*User, bool, error) {
+	// user、err 用于本次流程后续判断的user、err
+	user, err := u.GetByUsername(ctx, username)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	if !user.IsActive {
+		return nil, false, nil
+	}
+	// matched、needsUpgrade、err 用于本次流程后续判断的matched、needsUpgrade、err
+	matched, needsUpgrade, err := VerifyPassword(user.PasswordHash, plainPassword)
+	if err != nil || !matched {
+		return nil, false, err
+	}
+	if needsUpgrade {
+		if // upgradeErr 保存旧哈希升级失败或并发改密冲突。
+		upgradeErr := u.upgradeLegacyPassword(ctx, user, plainPassword); upgradeErr != nil {
+			return nil, false, upgradeErr
+		}
+	}
+	return user, true, nil
+}
+
+// upgradeLegacyPassword 使用比较并交换语义把已验证的旧 SHA-256 摘要升级为 bcrypt，避免并发改密被旧密码覆盖。
+// ctx 控制哈希写入生命周期；user 携带刚验证的旧摘要；plainPassword 仅用于生成新摘要；返回值不包含明文或摘要。
+func (u *Users) upgradeLegacyPassword(ctx context.Context, user *User, plainPassword string) error {
+	// expectedHash 保存刚完成密码验证的旧摘要，用作并发更新条件。
+	expectedHash := user.PasswordHash
+	// upgradedHash、hashErr 保存新 bcrypt 摘要及生成错误。
+	upgradedHash, hashErr := HashPassword(plainPassword)
+	if hashErr != nil {
+		return fmt.Errorf("升级旧密码哈希: %w", hashErr)
+	}
+	// result、updateErr 保存比较并交换写入结果和数据库错误。
+	result, updateErr := u.DB.ExecContext(ctx,
+		`UPDATE users SET password_hash=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND password_hash=?`,
+		upgradedHash, user.ID, expectedHash)
+	if updateErr != nil {
+		return fmt.Errorf("保存升级后的密码哈希: %w", updateErr)
+	}
+	// affected、affectedErr 保存实际更新行数及驱动读取错误。
+	affected, affectedErr := result.RowsAffected()
+	if affectedErr != nil {
+		return fmt.Errorf("确认密码哈希升级结果: %w", affectedErr)
+	}
+	if affected != 1 {
+		return ErrPasswordMismatch
+	}
+	user.PasswordHash = upgradedHash
+	return nil
+}
+
+// UpdatePassword 更新密码（bcrypt）。返回是否找到用户。
+func (u *Users) UpdatePassword(ctx context.Context, username, plainPassword string) (bool, error) {
+	// hash、err 用于本次流程后续判断的hash、err
+	hash, err := HashPassword(plainPassword)
+	if err != nil {
+		return false, fmt.Errorf("哈希密码: %w", err)
+	}
+	// tx、err 用于本次流程后续判断的tx、err
+	tx, err := u.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	// userID 用于本次流程后续判断的用户ID
+	var userID int64
+	// res、err 用于本次流程后续判断的res、err
+	res, err := tx.ExecContext(ctx,
+		`UPDATE users SET password_hash=?, auth_version=auth_version+1, updated_at=CURRENT_TIMESTAMP WHERE username=?`,
+		hash, username)
+	if err != nil {
+		return false, err
+	}
+	// n 用于本次流程后续判断的n
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return false, nil
+	}
+	if // err 用于本次流程后续判断的err
+	err := tx.QueryRowContext(ctx, `SELECT id FROM users WHERE username=?`, username).Scan(&userID); err != nil {
+		return false, err
+	}
+	if // err 用于本次流程后续判断的err
+	_, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=?`, userID); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
+}
+
+// UpdateCredentials 原子更新用户名及可选密码，并撤销该用户的全部登录会话。
+func (u *Users) UpdateCredentials(ctx context.Context, userID int64, username, plainPassword string) error {
+	// tx、err 用于本次流程后续判断的tx、err
+	tx, err := u.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// exists 用于本次流程后续判断的exists
+	var exists bool
+	if // err 用于本次流程后续判断的err
+	err := tx.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM users WHERE username=? AND id<>?)`, username, userID).Scan(&exists); err != nil {
+		return err
+	}
+	if exists {
+		return ErrUsernameTaken
+	}
+
+	// res 用于本次流程后续判断的响应
+	var res sql.Result
+	if plainPassword != "" {
+		// hash、hashErr 用于本次流程后续判断的hash、hashErr
+		hash, hashErr := HashPassword(plainPassword)
+		if hashErr != nil {
+			return fmt.Errorf("哈希密码: %w", hashErr)
+		}
+		res, err = tx.ExecContext(ctx,
+			`UPDATE users SET username=?, password_hash=?, auth_version=auth_version+1, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+			username, hash, userID)
+	} else {
+		res, err = tx.ExecContext(ctx,
+			`UPDATE users SET username=?, auth_version=auth_version+1, updated_at=CURRENT_TIMESTAMP WHERE id=?`, username, userID)
+	}
+	if err != nil {
+		return err
+	}
+	if // rows 用于本次流程后续判断的rows
+	rows, _ := res.RowsAffected(); rows == 0 {
+		return ErrNotFound
+	}
+	if // err 用于本次流程后续判断的err
+	_, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=?`, userID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// Delete 删除用户，并撤销该用户的全部登录会话。
+func (u *Users) Delete(ctx context.Context, userID int64) error {
+	// tx、err 用于本次流程后续判断的tx、err
+	tx, err := u.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if // err 用于本次流程后续判断的err
+	_, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=?`, userID); err != nil {
+		return err
+	}
+	// rows、err 用于本次流程后续判断的rows、err
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM cookies WHERE user_id=? ORDER BY id`, userID)
+	if err != nil {
+		return err
+	}
+	// cookieIDs 用于本次流程后续判断的登录凭证IDs
+	var cookieIDs []string
+	for rows.Next() {
+		// cookieID 用于本次流程后续判断的登录凭证ID
+		var cookieID string
+		if // err 用于本次流程后续判断的err
+		err := rows.Scan(&cookieID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		cookieIDs = append(cookieIDs, cookieID)
+	}
+	// iterationErr 保存数据库驱动在遍历 Cookie 行流结束时报告的错误；出现时禁止继续执行关联删除。
+	iterationErr := rows.Err()
+	// closeErr 保存关闭 Cookie 行流释放数据库资源时的错误。
+	closeErr := rows.Close()
+	if iterationErr != nil {
+		return iterationErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	// 旧 schema 中这些外键没有 ON DELETE CASCADE，必须显式清理。
+	for _, query := range []string{
+		`DELETE FROM automation_rules WHERE user_id=?`,
+		`DELETE FROM cards WHERE user_id=?`,
+		`DELETE FROM notification_channels WHERE user_id=?`,
+	} {
+		if // err 用于本次流程后续判断的err
+		_, err := tx.ExecContext(ctx, query, userID); err != nil {
+			return err
+		}
+	}
+	// cookieID 表示当前遍历过程中的登录凭证ID
+	for _, cookieID := range cookieIDs {
+		if // err 用于本次流程后续判断的err
+		err := deleteCookieTx(ctx, tx, cookieID); err != nil {
+			return err
+		}
+	}
+	// res、err 用于本次流程后续判断的res、err
+	res, err := tx.ExecContext(ctx, `DELETE FROM users WHERE id=?`, userID)
+	if err != nil {
+		return err
+	}
+	if // rows 用于本次流程后续判断的rows
+	rows, _ := res.RowsAffected(); rows == 0 {
+		return ErrNotFound
+	}
+	return tx.Commit()
+}
+
+// SetAdmin 标记用户为管理员（init-admin CLI 用）。
+func (u *Users) SetAdmin(ctx context.Context, username string) error {
+	// err 用于本次流程后续判断的err
+	_, err := u.DB.ExecContext(ctx, `UPDATE users SET is_admin=1 WHERE username=?`, username)
+	return err
+}
+
+// scanUser 封装scan用户业务协调。
+func (u *Users) scanUser(ctx context.Context, query string, args ...any) (*User, error) {
+	// usr 用于本次流程后续判断的usr
+	var usr User
+	// isActive、isAdmin 用于本次流程后续判断的isActive、isAdmin
+	var isActive, isAdmin int
+	// err 用于本次流程后续判断的err
+	err := u.DB.QueryRowContext(ctx, query, args...).Scan(
+		&usr.ID, &usr.Username, &usr.Email, &usr.PasswordHash,
+		&isActive, &isAdmin, &usr.AuthVersion, &usr.CreatedAt, &usr.UpdatedAt)
+	if err != nil && strings.Contains(strings.ToLower(query), "auth_version") && strings.Contains(strings.ToLower(err.Error()), "auth_version") {
+		// legacyQuery 兼容尚未执行 00046 的迁移测试库；生产库仍以带代次的查询为准。
+		legacyQuery := strings.Replace(query, ", auth_version", "", 1)
+		usr.AuthVersion = 1
+		err = u.DB.QueryRowContext(ctx, legacyQuery, args...).Scan(
+			&usr.ID, &usr.Username, &usr.Email, &usr.PasswordHash,
+			&isActive, &isAdmin, &usr.CreatedAt, &usr.UpdatedAt)
+	}
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	usr.IsActive = isActive != 0
+	usr.IsAdmin = isAdmin != 0
+	return &usr, nil
+}

@@ -1,0 +1,43 @@
+{
+  "name": "ydisks-xianyu-helper",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "api:generate": "openapi-typescript ../api/openapi.yaml -o shared/api-contract/generated/schema.ts",
+    "api:check": "node scripts/check-api-contract.mjs",
+    "comments:check": "node scripts/check-comments.mjs --mode check --root .",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "axios": "^1.13.2",
+    "benz-amr-recorder": "^1.1.5",
+    "lucide-react": "^0.562.0",
+    "openapi-fetch": "^0.14.0",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "recharts": "^3.6.0",
+    "yet-another-react-lightbox": "^3.32.2"
+  },
+  "devDependencies": {
+    "@testing-library/react": "^16.3.2",
+    "@types/node": "^22.14.0",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.0.0",
+    "@vitest/coverage-v8": "^4.1.6",
+    "autoprefixer": "^10.4.23",
+    "jsdom": "^30.0.1",
+    "openapi-typescript": "^7.9.1",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.17",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.0",
+    "vitest": "^4.1.6"
+  }
+}

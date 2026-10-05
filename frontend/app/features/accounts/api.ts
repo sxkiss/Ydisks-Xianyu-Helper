@@ -1,0 +1,400 @@
+import {
+AIReplySettings,
+AIReplySettingsResponse,
+AccountBindingsResponse,
+AccountDetail,AccountSummaryResponse,
+AccountTaskRunResponseEnvelope,
+AccountTaskSettings,
+AccountTaskSettingsResponse,
+CookieProfileResponse,
+CookieSettingsResponse,
+NotificationChannel,
+NotificationChannelResponse,
+NotificationEventType,
+OperationResponse,
+QRLoginGenerateResponse,QRLoginStatusResponse,QRLoginVerificationResponse
+} from './models';
+import { contractClient, runContractRequest } from '../../../shared/api-contract/client';
+import { type RequestControlOptions } from '../../../shared/http/client';
+import { collectionFrom,objectFrom } from '../../../shared/http/contract';
+export type * from './models';
+
+// QRLoginStatusResult 描述账号 feature 消费的非敏感二维码状态字段。
+export type QRLoginStatusResult = Pick<
+  QRLoginStatusResponse,
+  'status' | 'message' | 'session_id' | 'account_id' | 'is_new_account' | 'verification_screenshot' | 'face_qr_url'
+>;
+
+// Accounts
+// addAccount 新增账号。
+export const addAccount = async (id: string, value: string, loginMethod?: string): Promise<OperationResponse> => {
+  return runContractRequest(/* signal 是本次账号创建请求的超时与取消控制信号。 */ signal => contractClient.POST('/api/v1/accounts', {
+    body: { id, value, login_method: loginMethod },
+    signal,
+  }));
+};
+
+// accountAvatarURL 生成账号头像地址。
+const accountAvatarURL = (item: AccountSummaryResponse, version: string): string => {
+  // raw 原始值，用于当前 API 处理流程。
+  const raw = item.avatar_url || '';
+  if (!raw) return '';
+
+  try {
+    // url 解析后的地址，用于当前 API 处理流程。
+    const url = new URL(raw, window.location.origin);
+    if (url.hostname.endsWith('alicdn.com')) {
+      url.searchParams.set('_v', version);
+    }
+    return url.toString();
+  } catch {
+    return raw;
+  }
+};
+
+// getAccountDetails 读取账号详情。
+export const getAccountDetails = async (options?: RequestControlOptions): Promise<AccountDetail[]> => {
+  // data 数据，用于当前 API 处理流程。
+  const response = await runContractRequest(/* signal 是本次账号详情读取请求的超时与取消控制信号。 */ signal => contractClient.GET('/api/v1/accounts/details', { signal }), options);
+  // data 是兼容数组、null 和历史 data 包裹后的账号摘要列表。
+  const data = collectionFrom<AccountSummaryResponse>(response, ['data', 'accounts', 'details']);
+  // avatarVersion 头像缓存版本，用于当前 API 处理流程。
+  const avatarVersion = Date.now().toString();
+  return data.map(/* 当前回调用于处理集合元素或接口响应。 */ item => ({
+    id: item.id,
+    cookie_configured: item.has_cookie === true,
+    enabled: item.enabled,
+    auto_confirm: item.auto_confirm,
+    auto_consign: item.auto_consign === true,
+    auto_bargain: item.auto_bargain === true,
+    remark: item.remark,
+    pause_duration: item.pause_duration,
+    paused_until: Number(item.paused_until || 0),
+    paused: item.paused === true,
+    username: item.username || '',
+    login_password_configured: undefined,
+    show_browser: item.show_browser === true || item.show_browser === 1 || item.show_browser === '1' || item.show_browser === 'true',
+    nickname: item.nickname || item.remark || `账号 ${item.id.substring(0,6)}`,
+    avatar_url: accountAvatarURL(item, avatarVersion),
+    profile_error: item.profile_error || '',
+    ai_enabled: false,
+		auto_rate_enabled: item.auto_rate_enabled,
+		rate_content: item.rate_content || '不错的买家，交易愉快',
+		auto_polish_enabled: item.auto_polish_enabled,
+		polish_time: item.polish_time || '03:00',
+		last_rate_scan_at: Number(item.last_rate_scan_at || 0),
+		last_polish_date: item.last_polish_date || '',
+		last_polish_at: Number(item.last_polish_at || 0),
+  }));
+};
+
+// getAccountTaskSettings 读取账号计划任务设置。
+export const getAccountTaskSettings = async (id: string, options?: RequestControlOptions): Promise<AccountTaskSettingsResponse> =>
+	runContractRequest(/* signal 控制账号计划任务读取的取消和超时。 */ signal => contractClient.GET('/api/v1/account-tasks/{cid}', { params: { path: { cid: id } }, signal }), options);
+
+// updateAccountTaskSettings 更新账号计划任务设置。
+export const updateAccountTaskSettings = async (id: string, settings: AccountTaskSettings, options?: RequestControlOptions): Promise<AccountTaskSettingsResponse> =>
+	runContractRequest(/* signal 控制账号计划任务更新的取消和超时。 */ signal => contractClient.PUT('/api/v1/account-tasks/{cid}', { params: { path: { cid: id } }, body: settings, signal }), options);
+
+// runAccountTask 立即执行账号计划任务。
+export const runAccountTask = async (id: string, taskType: 'auto_rate' | 'auto_polish', options?: RequestControlOptions): Promise<AccountTaskRunResponseEnvelope> =>
+	runContractRequest(/* signal 控制账号计划任务立即执行的取消和长超时。 */ signal => contractClient.POST('/api/v1/account-tasks/{cid}/run', { params: { path: { cid: id } }, body: { task_type: taskType }, signal }), { timeoutMs: 120_000, ...options });
+
+
+export interface AccountRuntimeStatus {
+  /** state 表示状态。 */ state: NonNullable<AccountDetail['runtime_state']>;
+  /** message 表示消息数据。 */ message?: string;
+  /** connected 表示连接状态。 */ connected: boolean;
+  /** failures 表示失败次数。 */ failures: number;
+  /** updated_at 表示最后更新时间。 */ updated_at: string;
+}
+
+// getAccountRuntimeStatuses 读取账号运行状态。
+export const getAccountRuntimeStatuses = async (options?: RequestControlOptions): Promise<Record<string, AccountRuntimeStatus>> => {
+  // response 是按账号 ID 索引的非敏感运行状态快照。
+  const response = await runContractRequest(
+    /* signal 是本次账号运行状态读取请求的超时与取消控制信号。 */ signal => contractClient.GET('/api/v1/accounts/runtime-status', { signal }),
+    options,
+  );
+  return response;
+};
+
+// generateQRLogin 生成二维码登录会话。
+export const generateQRLogin = async (options?: RequestControlOptions): Promise<QRLoginGenerateResponse> => {
+  // 风控后匿名 token 接口可能超过通用的 30 秒请求窗口；后端总生成窗口为 2 分钟。
+  return runContractRequest(
+    /* signal 是本次二维码生成请求的超时与取消控制信号。 */ signal => contractClient.POST('/api/v1/qr-login/generate', { signal }),
+    { ...options, timeoutMs: options?.timeoutMs ?? 130_000 },
+  );
+};
+
+// checkQRLoginStatus 查询二维码登录状态。
+export const checkQRLoginStatus = async (sessionId: string, signal?: AbortSignal): Promise<QRLoginStatusResponse> => {
+  return runContractRequest(
+    /* requestSignal 是本次二维码轮询请求的超时与取消控制信号。 */ requestSignal => contractClient.GET('/api/v1/qr-login/check/{session_id}', { params: { path: { session_id: sessionId } }, signal: requestSignal }),
+    { signal, timeoutMs: 10_000 },
+  );
+};
+
+// completeQRVerification 完成二维码登录验证。
+export const completeQRVerification = async (
+  sessionId: string,
+  targetAccountId?: string,
+  options?: RequestControlOptions,
+): Promise<QRLoginVerificationResponse> => {
+  return runContractRequest(/* requestSignal 是本次风控完成请求的超时与取消控制信号。 */ requestSignal => contractClient.POST('/api/v1/qr-login/complete-verification/{session_id}', {
+    params: { path: { session_id: sessionId } },
+    body: { target_account_id: targetAccountId || '' },
+    signal: requestSignal,
+  }), options);
+};
+
+
+
+
+
+
+// updateAccountStatus 更新账号状态。
+export const updateAccountStatus = async (id: string, enabled: boolean): Promise<OperationResponse> => {
+  return runContractRequest(/* signal 是本次账号状态更新请求的超时与取消控制信号。 */ signal => contractClient.PUT('/api/v1/accounts/{cid}/status', {
+    params: { path: { cid: id } },
+    body: { enabled },
+    signal,
+  }));
+};
+
+// deleteAccount 删除账号。
+export const deleteAccount = async (id: string): Promise<OperationResponse> => {
+  return runContractRequest(/* signal 是本次账号删除请求的超时与取消控制信号。 */ signal => contractClient.DELETE('/api/v1/accounts/{cid}', {
+    params: { path: { cid: id } },
+    signal,
+  }));
+};
+
+// updateAccountRemark 更新账号备注。
+export const updateAccountRemark = async (id: string, remark: string): Promise<OperationResponse> => {
+  return runContractRequest(/* signal 是本次账号备注更新请求的超时与取消控制信号。 */ signal => contractClient.PUT('/api/v1/accounts/{cid}/remark', {
+    params: { path: { cid: id } },
+    body: { remark },
+    signal,
+  }));
+};
+
+// updateAccountAutoConfirm 更新账号自动确认设置。
+export const updateAccountAutoConfirm = async (id: string, autoConfirm: boolean): Promise<OperationResponse> => {
+  return runContractRequest(/* signal 是本次账号自动确认更新请求的超时与取消控制信号。 */ signal => contractClient.PUT('/api/v1/accounts/{cid}/auto-confirm', {
+    params: { path: { cid: id } },
+    body: { auto_confirm: autoConfirm },
+    signal,
+  }));
+};
+
+// updateAccountPauseDuration 更新账号暂停时长。
+export const updateAccountPauseDuration = async (id: string, pauseDuration: number, options?: RequestControlOptions): Promise<CookieSettingsResponse> => {
+  return runContractRequest(/* signal 是本次账号暂停时长更新请求的超时与取消控制信号。 */ signal => contractClient.PUT('/api/v1/accounts/{cid}/pause-duration', {
+    params: { path: { cid: id } },
+    body: { pause_duration: pauseDuration },
+    signal,
+  }), options);
+};
+
+// updateAccountCookie 更新账号登录凭证。
+export const updateAccountCookie = async (id: string, value: string, loginMethod?: string): Promise<OperationResponse> => {
+  return runContractRequest(/* signal 是本次账号凭据更新请求的超时与取消控制信号。 */ signal => contractClient.PUT('/api/v1/accounts/{cid}', {
+    params: { path: { cid: id } },
+    body: { id, value, login_method: loginMethod },
+    signal,
+  }));
+};
+
+export interface AccountSettingsUpdate {
+  /** cookie 表示登录凭证。 */ cookie?: string;
+  /** remark 表示备注。 */ remark?: string;
+  /** auto_confirm 表示自动发货状态。 */ auto_confirm?: boolean;
+  /** auto_consign 表示自动发货后是否自动转已发货。 */ auto_consign?: boolean;
+  /** auto_bargain 表示砍价“待刀成”阶段是否自动免拼。 */ auto_bargain?: boolean;
+  /** pause_duration 表示暂停时长。 */ pause_duration?: number;
+  /** username 表示用户名。 */ username?: string;
+  /** login_password 表示登录密码。 */ login_password?: string;
+  /** clear_password 表示是否清理登录密码。 */ clear_password?: boolean;
+  /** show_browser 表示是否显示浏览器。 */ show_browser?: boolean;
+  /** channel_ids 表示通知渠道标识列表。 */ channel_ids?: number[];
+}
+
+// updateAccountSettings 更新账号设置。
+export const updateAccountSettings = async (id: string, data: AccountSettingsUpdate, options?: RequestControlOptions): Promise<CookieSettingsResponse> => {
+  return runContractRequest(/* signal 是本次账号聚合设置更新请求的超时与取消控制信号。 */ signal => contractClient.PUT('/api/v1/accounts/{cid}/settings', {
+    params: { path: { cid: id } },
+    body: data,
+    signal,
+  }), options);
+};
+
+export interface LongLoginSettings {
+  /** can_open_long_login 表示是否允许开启长期登录。 */ can_open_long_login: boolean;
+  /** enabled 表示启用状态。 */ enabled: boolean;
+}
+
+// getLongLoginSettings 读取长期登录设置。
+export const getLongLoginSettings = async (id: string, options?: RequestControlOptions): Promise<LongLoginSettings> => {
+  return runContractRequest(/* signal 是本次长期登录设置读取请求的超时与取消控制信号。 */ signal => contractClient.GET('/api/v1/accounts/{cid}/long-login', {
+    params: { path: { cid: id } },
+    signal,
+  }), options);
+};
+
+// setLongLoginSettings 设置长期登录开关。
+export const setLongLoginSettings = async (id: string, enabled: boolean, options?: RequestControlOptions): Promise<LongLoginSettings> => {
+  return runContractRequest(/* signal 是本次长期登录设置更新请求的超时与取消控制信号。 */ signal => contractClient.PUT('/api/v1/accounts/{cid}/long-login', {
+    params: { path: { cid: id } },
+    body: { enabled },
+    signal,
+  }), options);
+};
+
+export interface PasswordLoginStartResponse {
+  /** success 表示是否成功。 */ success: boolean;
+  /** session_id 表示会话标识。 */ session_id?: string;
+  /** status 表示状态值。 */ status?: 'processing' | 'failed';
+  /** message 表示消息数据。 */ message?: string;
+}
+
+export interface PasswordLoginStatusResponse {
+  /** status 表示状态值。 */ status: 'processing' | 'success' | 'failed' | 'verification_required' | 'not_found' | 'error';
+  /** message 表示消息数据。 */ message?: string;
+  /** account_id 表示账号标识。 */ account_id?: string;
+  /** is_new_account 表示是否为新账号。 */ is_new_account?: boolean;
+  /** cookie_count 表示登录凭证数量。 */ cookie_count?: number;
+  /** verification_url 表示验证地址。 */ verification_url?: string;
+  /** screenshot_path 表示验证截图路径。 */ screenshot_path?: string;
+  /** qr_code_url 表示二维码地址。 */ qr_code_url?: string;
+  /** error 保存密码登录流程返回的失败说明；前端只用于界面提示，不应记录或序列化登录凭证。 */ error?: string;
+  /** reason 表示失败原因。 */ reason?: string;
+}
+
+// passwordLogin 执行密码登录。
+export const passwordLogin = async (data: {
+  /** account_id 表示账号标识。 */ account_id: string;
+  /** account 表示账号。 */ account: string;
+  /** password 表示密码。 */ password: string;
+  /** show_browser 表示是否显示浏览器。 */ show_browser?: boolean;
+}, options?: RequestControlOptions): Promise<PasswordLoginStartResponse> => {
+  return runContractRequest(/* signal 是永久关闭的密码登录请求的超时与取消控制信号。 */ signal => contractClient.POST('/api/v1/password-login', {
+    body: data,
+    signal,
+  }), options);
+};
+
+// checkPasswordLoginStatus 查询密码登录状态。
+export const checkPasswordLoginStatus = async (sessionId: string, signal?: AbortSignal): Promise<PasswordLoginStatusResponse> => {
+  // result 是永久关闭 operation 的理论成功类型；真实服务端恒定返回 password_login_disabled 错误。
+  const result = runContractRequest(/* requestSignal 是永久关闭的密码登录查询请求的超时与取消控制信号。 */ requestSignal => contractClient.GET('/api/v1/password-login/check/{session_id}', {
+    params: { path: { session_id: sessionId } },
+    signal: requestSignal,
+  }), { signal, timeoutMs: 10_000 });
+  return result as unknown as Promise<PasswordLoginStatusResponse>;
+};
+
+// cancelPasswordLogin 取消密码登录。
+export const cancelPasswordLogin = async (sessionId: string, options?: RequestControlOptions): Promise<OperationResponse> => {
+  return runContractRequest(/* signal 是永久关闭的密码登录取消请求的超时与取消控制信号。 */ signal => contractClient.DELETE('/api/v1/password-login/cancel/{session_id}', {
+    params: { path: { session_id: sessionId } },
+    signal,
+  }), options);
+};
+
+// refreshAccountProfile 刷新账号资料。
+export const refreshAccountProfile = async (id: string): Promise<CookieProfileResponse> => {
+  return runContractRequest(/* signal 是本次账号资料刷新请求的超时与取消控制信号。 */ signal => contractClient.POST('/api/v1/accounts/{cid}/refresh-profile', {
+    params: { path: { cid: id } },
+    signal,
+  }));
+};
+
+// updateAccountLoginInfo 更新账号登录信息。
+export const updateAccountLoginInfo = async (id: string, data: {
+  /** username 表示用户名。 */ username?: string;
+  /** login_password 表示登录密码。 */ login_password?: string;
+  /** clear_password 表示是否清理登录密码。 */ clear_password?: boolean;
+  /** show_browser 表示是否显示浏览器。 */ show_browser?: boolean;
+}): Promise<OperationResponse> => {
+  return runContractRequest(/* signal 是本次账号登录信息更新请求的超时与取消控制信号。 */ signal => contractClient.PUT('/api/v1/accounts/{cid}/login-info', {
+    params: { path: { cid: id } },
+    body: data,
+    signal,
+  }));
+};
+
+// getAllAISettings 读取全部人工智能设置。
+export const getAllAISettings = async (options?: RequestControlOptions): Promise<Record<string, AIReplySettings>> => {
+  const response = await runContractRequest(/* signal 控制全部账号 AI 设置读取的取消和超时。 */ signal => contractClient.GET('/api/v1/settings/ai-reply', { signal }), options) as unknown;
+  // settings 是兼容直接映射、data 包裹和 null 的账号 AI 设置索引。
+  return objectFrom<Record<string, AIReplySettings>>(response, ['settings', 'data', 'result']) || {};
+};
+
+
+// getAccountAISettings 读取账号人工智能设置。
+export const getAccountAISettings = async (cookieId: string, options?: RequestControlOptions): Promise<AIReplySettingsResponse> => {
+    return runContractRequest(/* signal 控制账号 AI 设置读取的取消和超时。 */ signal => contractClient.GET('/api/v1/settings/ai-reply/{cookie_id}', { params: { path: { cookie_id: cookieId } }, signal }), options) as unknown as Promise<AIReplySettingsResponse>;
+}
+
+// updateAccountAISettings 更新账号人工智能设置。
+export const updateAccountAISettings = async (cookieId: string, settings: Partial<AIReplySettings>, options?: RequestControlOptions): Promise<OperationResponse> => {
+  // payload 请求载荷，用于当前 API 处理流程。
+  const payload = {
+    ai_enabled: settings.ai_enabled ?? false,
+    auto_adjust_price_enabled: settings.auto_adjust_price_enabled ?? false,
+    max_discount_percent: settings.max_discount_percent ?? 10,
+    max_discount_amount: settings.max_discount_amount ?? 100,
+    max_bargain_rounds: settings.max_bargain_rounds ?? 3,
+    custom_prompts: settings.custom_prompts ?? ''
+  };
+  return runContractRequest(/* signal 控制账号 AI 设置更新的取消和超时。 */ signal => contractClient.PUT('/api/v1/settings/ai-reply/{cookie_id}', { params: { path: { cookie_id: cookieId } }, body: payload, signal }), options);
+}
+
+
+// parseNotificationEventTypes 解析通知事件类型。
+const parseNotificationEventTypes = (raw: unknown): NotificationEventType[] => {
+  if (Array.isArray(raw)) return raw.filter(Boolean) as NotificationEventType[];
+  if (typeof raw !== 'string' || !raw.trim()) return [];
+  try {
+    // parsed 转换后的数值，用于当前 API 处理流程。
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed.filter(Boolean) as NotificationEventType[];
+  } catch {
+    // fall back to legacy comma/semicolon separated values
+  }
+  return raw.split(/[,\s;]+/).map(/* 当前回调用于处理集合元素或接口响应。 */ v => v.trim()).filter(Boolean) as NotificationEventType[];
+};
+
+// getNotificationChannels 读取通知渠道。
+export const getNotificationChannels = async (options?: RequestControlOptions): Promise<{ /** success 表示是否成功。 */ success: boolean; /** data 表示数据。 */ data?: NotificationChannel[] }> => {
+  // result 接口响应结果，用于当前 API 处理流程。
+  const result = await runContractRequest(/* signal 控制账号页通知渠道读取的取消和超时。 */ signal => contractClient.GET('/api/v1/notifications/channels', { signal }), options) as unknown;
+  // channels 通知渠道列表，用于当前 API 处理流程。
+  const channels = collectionFrom<NotificationChannelResponse>(result, ['data', 'channels', 'items']).map(/* 当前回调用于处理集合元素或接口响应。 */ (item: NotificationChannelResponse) => {
+		// parsedConfig 是列表摘要刻意不返回渠道秘密时使用的空编辑初始值。
+		const parsedConfig: Record<string, unknown> = {};
+    // normalizedType 是兼容旧渠道别名后的前端渠道类型。
+    const normalizedType = (item.type === 'ding_talk' ? 'dingtalk' : (item.type === 'lark' ? 'feishu' : item.type)) as NotificationChannel['type'];
+    return {
+      id: String(item.id),
+      name: item.name,
+		type: normalizedType,
+      config: parsedConfig,
+      event_types: parseNotificationEventTypes(item.event_types),
+      enabled: item.enabled,
+    };
+  });
+  return { success: true, data: channels };
+}
+
+
+// 账号 ↔ 渠道 绑定（覆盖式）
+export const getAccountBindings = async (cookieId: string, options?: RequestControlOptions): Promise<number[]> => {
+  // response 是兼容直接绑定对象、data 包裹和 null 的通知绑定响应。
+  const response = await runContractRequest(/* signal 控制账号页通知绑定读取的取消和超时。 */ signal => contractClient.GET('/api/v1/notifications/accounts/{cid}/bindings', { params: { path: { cid: cookieId } }, signal }), options) as unknown;
+  // result 是去除历史包裹后的账号通知绑定对象。
+  const result = objectFrom<Partial<AccountBindingsResponse>>(response, ['data', 'result']) || {};
+  return Array.isArray(result.channel_ids) ? result.channel_ids : [];
+}

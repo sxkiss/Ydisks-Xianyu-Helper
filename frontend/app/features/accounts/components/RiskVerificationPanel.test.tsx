@@ -1,0 +1,16 @@
+import { renderToStaticMarkup } from 'react-dom/server';
+import { expect,test } from 'vitest';
+import { RiskVerificationPanel } from './RiskVerificationPanel';
+
+test('risk verification panel explains automatic refresh without manual controls', /* 当前回调处理用户交互或异步状态变化。 */ () => {
+  // html 渲染后的 HTML。
+  const html = renderToStaticMarkup(
+    <RiskVerificationPanel faceQrUrl="data:image/png;base64,abc" />,
+  );
+  expect(html).toContain('需要完成安全风控验证');
+  expect(html).toContain('系统会自动检测并刷新登录状态');
+  expect(html).toContain('max-h-[min(64vh,28rem)]');
+  expect(html).not.toContain('<button');
+  expect(html).not.toContain('我已');
+  expect(html).not.toContain('重试');
+});

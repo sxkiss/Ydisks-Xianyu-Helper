@@ -1,0 +1,16 @@
+### Ydisks Xianyu Helper / Ydisks闲鱼助手
+
+- [Home](Home) · [中文](Home.zh-CN)
+- [Deployment and Database](Deployment-and-Database) · [中文](部署与数据库.zh-CN)
+- [Dashboard](Dashboard) · [中文](仪表盘.zh-CN)
+- [Account Management](Account-Management) · [中文](账号管理.zh-CN)
+- [Card Inventory](Card-Inventory) · [中文](卡密库存.zh-CN)
+- [Product Management](Product-Management) · [中文](商品管理.zh-CN)
+- [Orders](Orders) · [中文](订单管理.zh-CN)
+- [Delivery Templates](Delivery-Templates) · [中文](发货模板.zh-CN)
+- [Chat and Account Automation](Chat-and-Account-Automation) · [中文](在线聊天与账号自动任务.zh-CN)
+- [Bulk Listing](Bulk-Listing) · [中文](批量铺货.zh-CN)
+- [Automated Delivery and Replies](Automated-Delivery-and-Replies) · [中文](自动化发货与回复.zh-CN)
+- [AI, Notifications and Operations](AI-Notifications-and-Operations) · [中文](AI、通知与运维.zh-CN)
+- [System and AI](System-and-AI) · [中文](系统设置.zh-CN)
+- [Accounts, Inventory and Products](Accounts-Inventory-and-Products) · [中文](账号、库存与商品.zh-CN)

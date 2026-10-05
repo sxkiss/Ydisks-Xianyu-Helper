@@ -1,0 +1,81 @@
+x-app-env: &app-env
+  DATABASE_URL: ${DATABASE_URL:?请在 .env 中配置 DATABASE_URL}
+  XIANYU_DATA_KEY: ${XIANYU_DATA_KEY:?请在 .env 中配置 XIANYU_DATA_KEY}
+  XIANYU_UPLOAD_DIR: ${XIANYU_UPLOAD_DIR:-/app/data/uploads}
+  TZ: ${TZ:-Asia/Shanghai}
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  LOG_FORMAT: ${LOG_FORMAT:-json}
+  BROWSER_HEADLESS: ${BROWSER_HEADLESS:-true}
+  XIANYU_CONTINUE_AFTER_UNCERTAIN: ${XIANYU_CONTINUE_AFTER_UNCERTAIN:-1}
+
+x-app-volumes: &app-volumes
+  - app_data:/app/data
+  - browser_data:/app/browser_data
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:17-trixie}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?请在 .env 中配置 POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER:?请在 .env 中配置 POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 中配置 POSTGRES_PASSWORD}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  app:
+    image: ${XIANYU_IMAGE:-ydisks-xianyu-helper:debian13}
+    build:
+      context: .
+      dockerfile: Dockerfile.debian13
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment: *app-env
+    command: ["/app/xianyu-server", "-addr", ":59188"]
+    ports:
+      - "${XIANYU_BIND_ADDRESS:-0.0.0.0}:${XIANYU_HTTP_PORT:-59188}:59188"
+    volumes: *app-volumes
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:59188/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  init-admin:
+    image: ${XIANYU_IMAGE:-ydisks-xianyu-helper:debian13}
+    build:
+      context: .
+      dockerfile: Dockerfile.debian13
+    profiles: ["init"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *app-env
+      XIANYU_ADMIN_PASSWORD: ${XIANYU_ADMIN_PASSWORD:-}
+    command:
+      - /bin/sh
+      - -c
+      - >-
+        test -n "$$XIANYU_ADMIN_PASSWORD" ||
+        { echo "XIANYU_ADMIN_PASSWORD is required"; exit 1; };
+        exec /app/xianyu-server -init-admin -admin-password "$$XIANYU_ADMIN_PASSWORD"
+    volumes: *app-volumes
+
+volumes:
+  postgres_data:
+  app_data:
+  browser_data:

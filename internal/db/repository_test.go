@@ -1,0 +1,261 @@
+package db
+
+import (
+	"context"
+	"path/filepath"
+	"testing"
+)
+
+// newTestDB 封装newTestDB业务协调。
+func newTestDB(t *testing.T) (*Store, func()) {
+	t.Helper()
+	// dbPath 用于本次流程后续判断的db路径
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	// db、err 用于本次流程后续判断的db、err
+	db, _, err := Open(context.Background(), dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	// s 用于本次流程后续判断的s
+	s := NewStore(db, DialectSQLite)
+	return s, func() { db.Close() }
+}
+
+// TestPassword_LegacySHA256Compat 老 SHA-26 哈希能校验、且标记需升级。
+func TestPassword_LegacySHA256Compat(t *testing.T) {
+	// legacy 用于本次流程后续判断的legacy
+	legacy := legacySHA256("hunter2")
+	// matched、needsUpgrade、err 用于本次流程后续判断的matched、needsUpgrade、err
+	matched, needsUpgrade, err := VerifyPassword(legacy, "hunter2")
+	if err != nil || !matched || !needsUpgrade {
+		t.Fatalf("老哈希校验失败: matched=%v needsUpgrade=%v err=%v", matched, needsUpgrade, err)
+	}
+	// matched2 用于本次流程后续判断的matched2
+	matched2, _, _ := VerifyPassword(legacy, "wrong")
+	if matched2 {
+		t.Fatal("错误密码不应通过")
+	}
+}
+
+// TestPassword_Bcrypt 新 bcrypt 哈希正常工作且不标记升级。
+func TestPassword_Bcrypt(t *testing.T) {
+	// h、err 用于本次流程后续判断的h、err
+	h, err := HashPassword("s3cret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// matched、needsUpgrade、err 用于本次流程后续判断的matched、needsUpgrade、err
+	matched, needsUpgrade, err := VerifyPassword(h, "s3cret")
+	if err != nil || !matched || needsUpgrade {
+		t.Fatalf("bcrypt 校验: matched=%v needsUpgrade=%v err=%v", matched, needsUpgrade, err)
+	}
+}
+
+// TestUserLifecycle 创建→验证→升级→改密 全链路。
+func TestUserLifecycle(t *testing.T) {
+	// s、cleanup 用于本次流程后续判断的s、cleanup
+	s, cleanup := newTestDB(t)
+	defer cleanup()
+	// ctx 用于本次流程后续判断的ctx
+	ctx := context.Background()
+
+	// 系统未初始化。
+	if init, _ := s.Users.IsSystemInitialized(ctx); init {
+		t.Fatal("新库不应已初始化")
+	}
+
+	// ok、err 用于本次流程后续判断的ok、err
+	ok, err := s.Users.Create(ctx, "admin", "admin@example.com", "pw123")
+	if err != nil || !ok {
+		t.Fatalf("Create: ok=%v err=%v", ok, err)
+	}
+	if // err 用于本次流程后续判断的err
+	err := s.Users.SetAdmin(ctx, "admin"); err != nil {
+		t.Fatalf("SetAdmin: %v", err)
+	}
+	if // init 用于本次流程后续判断的init
+	init, _ := s.Users.IsSystemInitialized(ctx); !init {
+		t.Fatal("创建 admin 后应已初始化")
+	}
+
+	// 重复创建应失败。
+	ok2, _ := s.Users.Create(ctx, "admin", "other@example.com", "x")
+	if ok2 {
+		t.Fatal("重复用户名应创建失败")
+	}
+
+	// 验证密码 + bcrypt 升级路径（新用户直接 bcrypt，无需升级）。
+	user, ok, err := s.Users.VerifyAndUpgrade(ctx, "admin", "pw123")
+	if err != nil || !ok || user == nil {
+		t.Fatalf("VerifyAndUpgrade: ok=%v err=%v", ok, err)
+	}
+	if !user.IsAdmin {
+		t.Fatal("应为管理员")
+	}
+
+	// 改密后旧密码失效。
+	_, _ = s.Users.UpdatePassword(ctx, "admin", "newpw")
+	// okOld 用于本次流程后续判断的okOld
+	_, okOld, _ := s.Users.VerifyAndUpgrade(ctx, "admin", "pw123")
+	if okOld {
+		t.Fatal("旧密码应失效")
+	}
+	// okNew 用于本次流程后续判断的okNew
+	_, okNew, _ := s.Users.VerifyAndUpgrade(ctx, "admin", "newpw")
+	if !okNew {
+		t.Fatal("新密码应可用")
+	}
+}
+
+// TestSessionRoundTrip 创建→读取→删除。
+func TestSessionRoundTrip(t *testing.T) {
+	// s、cleanup 用于本次流程后续判断的s、cleanup
+	s, cleanup := newTestDB(t)
+	defer cleanup()
+	// ctx 用于本次流程后续判断的ctx
+	ctx := context.Background()
+
+	s.Users.Create(ctx, "u1", "u1@e.com", "pw")
+	// user 用于本次流程后续判断的用户
+	user, _, _ := s.Users.VerifyAndUpgrade(ctx, "u1", "pw")
+
+	// sid、err 用于本次流程后续判断的sid、err
+	sid, err := s.Sessions.Create(ctx, user)
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	// got、err 用于本次流程后续判断的got、err
+	got, err := s.Sessions.Get(ctx, sid)
+	if err != nil || got == nil || got.UserID != user.ID {
+		t.Fatalf("Get session: got=%+v err=%v", got, err)
+	}
+	if // err 用于本次流程后续判断的err
+	err := s.Sessions.Delete(ctx, sid); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if // err 用于本次流程后续判断的err
+	_, err := s.Sessions.Get(ctx, sid); err != ErrNotFound {
+		t.Fatalf("删除后应 ErrNotFound，got err=%v", err)
+	}
+}
+
+// TestCookieSaveRequiresInit 未初始化时 Save 应报错（不兜底 user_id=1）。
+func TestCookieSaveRequiresInit(t *testing.T) {
+	// s、cleanup 用于本次流程后续判断的s、cleanup
+	s, cleanup := newTestDB(t)
+	defer cleanup()
+	// ctx 用于本次流程后续判断的ctx
+	ctx := context.Background()
+
+	// err 用于本次流程后续判断的err
+	err := s.Cookies.Save(ctx, "cid", "cookievalue", 0)
+	if err == nil {
+		t.Fatal("系统未初始化时 Save cookie 应报错")
+	}
+
+	// 初始化 admin 后，用其 user_id 保存。
+	s.Users.Create(ctx, "admin", "a@e.com", "pw")
+	// admin 用于本次流程后续判断的admin
+	admin, _ := s.Users.GetByUsername(ctx, "admin")
+	if // err 用于本次流程后续判断的err
+	err := s.Cookies.Save(ctx, "cid", "cookievalue", admin.ID); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	// d、err 用于本次流程后续判断的d、err
+	d, err := s.Cookies.GetDetails(ctx, "cid")
+	if err != nil || d.Value != "cookievalue" || d.PauseDuration != 10 {
+		t.Fatalf("GetDetails: %+v err=%v", d, err)
+	}
+	// value 保存按账号 ID 读取的单个 Cookie 明文，验证保存流程不会依赖批量凭证展开。
+	value, valueErr := s.Cookies.GetValue(ctx, "cid")
+	if valueErr != nil || value != "cookievalue" {
+		t.Fatalf("GetValue: %q err=%v", value, valueErr)
+	}
+	if // pd 用于本次流程后续判断的pd
+	pd := s.Cookies.GetPauseDuration(ctx, "cid"); pd != 10 {
+		t.Fatalf("GetPauseDuration=%d want 10", pd)
+	}
+	if // enabled、err 用于本次流程后续判断的enabled、err
+	enabled, err := s.Cookies.GetAutoConfirm(ctx, "cid"); err != nil || !enabled {
+		t.Fatalf("GetAutoConfirm=%v want true, err=%v", enabled, err)
+	}
+	// consignEnabled、consignErr 验证新账号默认不自动调用平台确认发货接口。
+	consignEnabled, consignErr := s.Cookies.GetAutoConsign(ctx, "cid")
+	if consignErr != nil || consignEnabled {
+		t.Fatalf("GetAutoConsign=%v want false, err=%v", consignEnabled, consignErr)
+	}
+	// autoConsignUpdate 验证账号设置事务可以显式开启自动确认发货动作。
+	autoConsignUpdate := true
+	// updateErr 表示 SQLite 写入自动确认发货开关时的错误。
+	if _, updateErr := s.Cookies.UpdateSettings(ctx, "cid", AccountSettingsUpdate{UserID: admin.ID, AutoConsign: &autoConsignUpdate}); updateErr != nil {
+		t.Fatalf("开启 auto_consign: %v", updateErr)
+	}
+	// consignEnabled、consignErr 验证显式开启后能从 SQLite 读回新开关。
+	if consignEnabled, consignErr := s.Cookies.GetAutoConsign(ctx, "cid"); consignErr != nil || !consignEnabled {
+		t.Fatalf("开启后 GetAutoConsign=%v err=%v", consignEnabled, consignErr)
+	}
+	if // err 用于本次流程后续判断的err
+	_, err := s.DB.ExecContext(ctx, `UPDATE cookies SET auto_confirm=0 WHERE id=?`, "cid"); err != nil {
+		t.Fatalf("关闭 auto_confirm: %v", err)
+	}
+	if // enabled、err 用于本次流程后续判断的enabled、err
+	enabled, err := s.Cookies.GetAutoConfirm(ctx, "cid"); err != nil || enabled {
+		t.Fatalf("GetAutoConfirm=%v want false, err=%v", enabled, err)
+	}
+}
+
+// TestCookieLoginAudit 封装Test登录凭证登录Audit业务协调。
+func TestCookieLoginAudit(t *testing.T) {
+	// s、cleanup 用于本次流程后续判断的s、cleanup
+	s, cleanup := newTestDB(t)
+	defer cleanup()
+	// ctx 用于本次流程后续判断的ctx
+	ctx := context.Background()
+
+	if // err 用于本次流程后续判断的err
+	_, err := s.Users.Create(ctx, "admin", "a@e.com", "pw"); err != nil {
+		t.Fatalf("Create user: %v", err)
+	}
+	// admin 用于本次流程后续判断的admin
+	admin, _ := s.Users.GetByUsername(ctx, "admin")
+	if // err 用于本次流程后续判断的err
+	err := s.Cookies.Save(ctx, "cid", "cookievalue", admin.ID); err != nil {
+		t.Fatalf("Save cookie: %v", err)
+	}
+	if // err 用于本次流程后续判断的err
+	err := s.Cookies.UpdateLoginInfo(ctx, "cid", "login-user", "secret", true); err != nil {
+		t.Fatalf("UpdateLoginInfo: %v", err)
+	}
+	if // err 用于本次流程后续判断的err
+	err := s.Cookies.MarkLogin(ctx, "cid", "password", 12345); err != nil {
+		t.Fatalf("MarkLogin: %v", err)
+	}
+	// d、err 用于本次流程后续判断的d、err
+	d, err := s.Cookies.GetDetails(ctx, "cid")
+	if err != nil {
+		t.Fatalf("GetDetails: %v", err)
+	}
+	if d.Username != "login-user" || d.Password != "secret" || !d.ShowBrowser {
+		t.Fatalf("登录资料未保存: %+v", d)
+	}
+	if d.LoginMethod != "password" || d.LastLoginAt != 12345 {
+		t.Fatalf("登录审计字段异常: method=%q at=%d", d.LoginMethod, d.LastLoginAt)
+	}
+
+	if // err 用于本次流程后续判断的err
+	err := s.LoginLogs.Add(ctx, AccountLoginLog{CookieID: "cid", UserID: admin.ID, Method: "password", Status: "failed", Message: "wrong", CreatedAt: 10}); err != nil {
+		t.Fatalf("Add log failed: %v", err)
+	}
+	if // err 用于本次流程后续判断的err
+	err := s.LoginLogs.Add(ctx, AccountLoginLog{CookieID: "cid", UserID: admin.ID, Method: "password", Status: "success", Message: "ok", CreatedAt: 20}); err != nil {
+		t.Fatalf("Add log success: %v", err)
+	}
+	// logs、err 用于本次流程后续判断的logs、err
+	logs, err := s.LoginLogs.ListByCookie(ctx, "cid", 10)
+	if err != nil {
+		t.Fatalf("ListByCookie: %v", err)
+	}
+	if len(logs) != 2 || logs[0].Status != "success" || logs[1].Status != "failed" {
+		t.Fatalf("登录日志排序/内容异常: %#v", logs)
+	}
+}
