@@ -28,8 +28,14 @@ const (
 
 // newAIHTTPClient 用于本次流程后续判断的newAIHTTPClient
 var newAIHTTPClient = func(baseURL string) (*http.Client, error) {
-	return netguard.ConfiguredEndpointHTTPClient(baseURL, 30*time.Second)
+	// 上游 agent 会做工具调用与多轮推理，30s 经常不够（表现为
+	// "timeout awaiting response headers"）。放宽到 120s，与调用侧 context 对齐。
+	return netguard.ConfiguredEndpointHTTPClient(baseURL, aiRequestTimeout)
 }
+
+// aiRequestTimeout 是单次 AI 请求的总超时。上游 agent 可能执行工具调用，
+// 过短会把正常的慢响应误判为失败。
+const aiRequestTimeout = 120 * time.Second
 
 // AIReplierImpl AI 回复实现。
 type AIReplierImpl struct {
@@ -121,7 +127,7 @@ func (a *AIReplierImpl) Reply(ctx context.Context, m ChatMessage) (*ReplyResult,
 	messages = append(messages, openai.ChatCompletionMessage{Role: openai.ChatMessageRoleUser, Content: m.Text})
 
 	// aiCtx、cancel 用于本次流程后续判断的人工智能Ctx、cancel
-	aiCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	aiCtx, cancel := context.WithTimeout(ctx, aiRequestTimeout)
 	defer cancel()
 	// resp、err 用于本次流程后续判断的resp、err
 	resp, err := client.CreateChatCompletion(aiCtx, openai.ChatCompletionRequest{
@@ -259,7 +265,7 @@ func (a *AIReplierImpl) replyGeneral(ctx context.Context, cfg *db.AIReplySetting
 	}
 	messages = append(messages, openai.ChatCompletionMessage{Role: openai.ChatMessageRoleUser, Content: userText})
 
-	aiCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	aiCtx, cancel := context.WithTimeout(ctx, aiRequestTimeout)
 	defer cancel()
 	resp, err := client.CreateChatCompletion(aiCtx, openai.ChatCompletionRequest{
 		Model:       aiCfg.Model,
