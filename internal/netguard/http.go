@@ -96,7 +96,9 @@ func ConfiguredEndpointHTTPClient(rawBaseURL string, timeout time.Duration) (*ht
 	if baseURL.Scheme != "http" && baseURL.Scheme != "https" {
 		return nil, fmt.Errorf("服务地址只支持 http 或 https")
 	}
-	return ConfiguredHTTPClient(timeout), nil
+	// 响应头超时跟随整体超时：AI agent 端点做工具调用+多轮推理，
+	// 首字节常超过 10s，写死会把 Client.Timeout 放宽也救不回来。
+	return policyHTTPClient(defaultOutboundPolicy, timeout, timeout, 10*time.Second), nil
 }
 
 // PolicyHTTPClient 返回绑定指定运行时策略的 HTTP 客户端，测试和组合根可使用它隔离全局默认值。
