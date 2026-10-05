@@ -363,6 +363,10 @@ func extractChatMessage(decrypted map[string]any, accountID, cookieStr string) *
 	reminderURL, _ := m10["reminderUrl"].(string)
 	// itemID 用于本次流程后续判断的商品ID
 	itemID := extractItemID(reminderURL)
+	// imageURL 是买家图片消息的真实地址；文本消息为空。
+	// 平台的 reminderContent 对图片只给 "[图片]" 摘要，这里补充提取正文里的地址，
+	// 使 AI/客服 能看到图片而不是一个占位符。
+	imageURL := extractImageObservationContent(decrypted)
 	return &ChatMessage{
 		AccountID:    accountID,
 		CookieStr:    cookieStr,
@@ -370,6 +374,7 @@ func extractChatMessage(decrypted map[string]any, accountID, cookieStr string) *
 		SenderUserID: senderUserID,
 		SenderName:   senderName,
 		Text:         reminder,
+		ImageURL:     imageURL,
 		MessageID:    extractMessageID(decrypted),
 		ItemID:       itemID,
 		Raw:          decrypted,

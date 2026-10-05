@@ -154,6 +154,9 @@ type ChatMessage struct {
 	SenderUserID string
 	SenderName   string
 	Text         string
+	// ImageURL 是买家图片消息的公网地址；平台对图片只在下发摘要里给 "[图片]" 占位符，
+	// 必须从正文提取真实地址，否则下游只能看到占位符。
+	ImageURL     string
 	MessageID    string
 	ItemID       string
 	// ObservedAt 是 WebSocket 分发器首次接纳消息的 Unix 毫秒时间，防抖期间保持不变，用于和本地会话删除排序。

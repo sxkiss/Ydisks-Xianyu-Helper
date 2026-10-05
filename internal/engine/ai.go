@@ -128,6 +128,8 @@ func (a *AIReplierImpl) Reply(ctx context.Context, m ChatMessage) (*ReplyResult,
 		Model:       aiCfg.Model,
 		Messages:    messages,
 		Temperature: 0.7,
+		// user 让上游按买家隔离会话，避免不同买家串话。
+		User: a.conversationUserKey(m),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("AI 调用失败: %w", err)
@@ -180,6 +182,18 @@ func (a *AIReplierImpl) Reply(ctx context.Context, m ChatMessage) (*ReplyResult,
 	return &ReplyResult{Text: reply, AutoPriceQuote: quote}, nil
 }
 
+// conversationUserKey 生成给上游 agent 的会话隔离键（OpenAI 兼容层的 user 字段）。
+// 上游没有 session 概念，若只按模型派生会话，所有买家会共用一个上下文而互相串话；
+// 这里下发「账号_买家会话」，让上游按买家隔离上下文。
+func (a *AIReplierImpl) conversationUserKey(m ChatMessage) string {
+	// chatID 为空时无法隔离，交给上游默认行为。
+	chatID := strings.TrimSpace(m.ChatID)
+	if chatID == "" {
+		return ""
+	}
+	return a.cookieID + "_" + chatID
+}
+
 // replyGeneral 处理非砍价的普通买家消息（通用客服）。
 // 接入的模型/智能体自带人设与知识，因此本路径不注入 system 提示词，
 // 只转发对话历史与当前消息；并且永不产生改价提案，避免普通咨询触发真实降价。
@@ -230,7 +244,20 @@ func (a *AIReplierImpl) replyGeneral(ctx context.Context, cfg *db.AIReplySetting
 		}
 		messages = append(messages, openai.ChatCompletionMessage{Role: role, Content: truncateAIContent(message.Content)})
 	}
-	messages = append(messages, openai.ChatCompletionMessage{Role: openai.ChatMessageRoleUser, Content: m.Text})
+	// userText 是本次下发给模型的内容。买家发图片时平台只给 "[图片]" 摘要，
+	// 这里补上真实图片地址，避免模型只看到一个占位符。
+	userText := strings.TrimSpace(m.Text)
+	if imageURL := strings.TrimSpace(m.ImageURL); imageURL != "" {
+		if userText == "" || userText == "[图片]" {
+			userText = "[图片] " + imageURL
+		} else {
+			userText = userText + "\n[图片] " + imageURL
+		}
+	}
+	if userText == "" {
+		return nil, nil
+	}
+	messages = append(messages, openai.ChatCompletionMessage{Role: openai.ChatMessageRoleUser, Content: userText})
 
 	aiCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -238,6 +265,8 @@ func (a *AIReplierImpl) replyGeneral(ctx context.Context, cfg *db.AIReplySetting
 		Model:       aiCfg.Model,
 		Messages:    messages,
 		Temperature: 0.7,
+		// user 让上游按买家隔离会话，避免不同买家串话。
+		User: a.conversationUserKey(m),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("AI 调用失败: %w", err)
@@ -252,7 +281,7 @@ func (a *AIReplierImpl) replyGeneral(ctx context.Context, cfg *db.AIReplySetting
 	}
 	if m.ChatID != "" && m.ItemID != "" {
 		if err := a.store.AIReply.AddConversationExchange(ctx, a.cookieID, m.ChatID, m.SenderUserID, m.ItemID,
-			db.AIConversationMessage{Role: "user", Content: m.Text, Intent: "general"},
+			db.AIConversationMessage{Role: "user", Content: userText, Intent: "general"},
 			db.AIConversationMessage{Role: "assistant", Content: reply, Intent: "reply"},
 		); err != nil {
 			return nil, fmt.Errorf("保存 AI 对话失败: %w", err)
