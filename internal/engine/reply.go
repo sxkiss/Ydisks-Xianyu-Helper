@@ -391,3 +391,16 @@ func safeFormat(template string, vars map[string]string) string {
 	}
 	return out
 }
+
+// IsGeneralAIEnabled 返回当前账号是否开启了通用 AI 客服。
+// 用于 canAutoReply 门禁：无商品 ID 的纯聊天消息在通用客服开启时放行。
+func (r *ReplyService) IsGeneralAIEnabled(ctx context.Context) bool {
+	if r.store == nil || r.ai == nil {
+		return false
+	}
+	cfg, err := r.store.AIReply.Get(ctx, r.cookieID)
+	if err != nil || cfg == nil {
+		return false
+	}
+	return cfg.AIEnabled && cfg.GeneralEnabled
+}

@@ -26,7 +26,11 @@ type replySessionRoleStore interface {
 // canAutoReply 核验 message 的会话商品是否仍属于当前账号的本地商品库；ctx 来自账号生命周期。
 // 本地查询失败、商品缺失、缺少身份或查询期间账号切换均禁止自动回复，聊天消息仍正常观察和保存。
 func (d *messageDispatcher) canAutoReply(ctx context.Context, message ChatMessage) bool {
+	// 无商品 ID 的消息：若通用 AI 客服已启用则放行，交给 replyGeneral 处理纯聊天。
 	if strings.TrimSpace(message.ItemID) == "" {
+		if d.reply != nil && d.reply.IsGeneralAIEnabled(ctx) {
+			return true
+		}
 		return false
 	}
 	// handler 是已经完成消息落库的业务处理器；缺少角色仓储时采用拒绝回复的保守语义。
