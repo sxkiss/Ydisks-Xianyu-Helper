@@ -148,20 +148,7 @@ func (a *Adapter) OnTokenCaptchaVerification(ctx context.Context, cookieID, cook
 	// start 用于本次流程后续判断的开始
 	start := time.Now()
 	// logID 用于本次流程后续判断的logID
-	var logID int64
-	if a.store != nil && a.store.RiskLogs != nil {
-		if // id、err 用于本次流程后续判断的id、err
-		id, err := a.store.RiskLogs.Add(ctx, db.RiskControlLog{
-			CookieID:         cookieID,
-			EventType:        "slider_captcha",
-			EventDescription: "触发场景: Token刷新, URL: " + verificationURL,
-			ProcessingStatus: "processing",
-		}); err == nil {
-			logID = id
-		} else {
-			a.logger.Warn("记录风控日志失败", "account", cookieID, "err", err)
-		}
-	}
+	logID := a.openTokenCaptchaRiskLog(ctx, cookieID, verificationURL)
 
 	// showBrowser 用于本次流程后续判断的show浏览器
 	showBrowser := false
@@ -178,62 +165,13 @@ func (a *Adapter) OnTokenCaptchaVerification(ctx context.Context, cookieID, cook
 		showBrowser = d.ShowBrowser
 		metadataJSON = d.MetadataJSON
 	}
-
-	// provider 用于本次流程后续判断的provider
-	provider := func(runCtx context.Context, currentCookies string) (string, bool, string, error) {
-		if a.captchaReq == nil {
-			return "", false, "", nil
-		}
-		// res、err 用于本次流程后续判断的res、err
-		res, err := a.captchaReq.RequestFreshCaptchaURLContext(runCtx, currentCookies, deviceID)
-		if err != nil || res == nil {
-			return "", false, "", err
-		}
-		return res.VerificationURL, res.TokenOK, res.UpdatedCookies, nil
-	}
-
-	// newCookies 用于本次流程后续判断的newCookies
-	newCookies := ""
-	// captchaEngine 用于本次流程后续判断的captchaEngine
-	captchaEngine := "playwright"
-	// remoteHandled 用于本次流程后续判断的remoteHandled
-	remoteHandled := false
 	// captchaHeadless 用于本次流程后续判断的captchaHeadless
 	captchaHeadless := browser.ResolveHeadless(showBrowser)
-	// err 用于本次流程后续判断的err
-	var err error
-	if // remoteConfig 用于本次流程后续判断的remote配置
-	remoteConfig := a.loadRemoteCaptchaConfig(ctx, cookieID); remoteConfig != nil {
-		newCookies, remoteHandled, err = solveRemoteCaptcha(
-			ctx, newRemoteCaptchaHTTPClient(), *remoteConfig,
-			cookieID, verificationURL, cookieStr, deviceID, provider,
-		)
-		if remoteHandled {
-			captchaEngine = "remote"
-		} else if err != nil {
-			a.logger.Warn("远程过滑块不可用，回退本机逻辑", "account", cookieID, "err", err)
-			err = nil
-		}
-	}
-	if !remoteHandled {
-		// br、ok 用于本次流程后续判断的br、ok
-		br, ok := a.browser.(browserTokenCaptchaRecoverer)
-		if a.browser == nil || !ok {
-			a.OnAccountEvent(ctx, cookieID, engine.EventSecurityVerification, engine.AlertLevelWarn,
-				"token 风控验证无法自动处理", "远程服务不可用且浏览器自动化未启用，无法自动完成 token 滑块验证。")
-			return nil, false
-		}
-		if // withEngine、ok 用于本次流程后续判断的withEngine、ok
-		withEngine, ok := a.browser.(browserTokenCaptchaEngineRecoverer); ok {
-			newCookies, captchaEngine, err = withEngine.TokenCaptchaRecoverWithEngine(
-				ctx, cookieID, cookieStr, verificationURL, captchaHeadless, provider,
-			)
-		} else {
-			newCookies, err = br.TokenCaptchaRecover(
-				ctx, cookieID, cookieStr, verificationURL, captchaHeadless, provider,
-			)
-		}
-	}
+
+	// newCookies、captchaEngine、err 保存远程或本机过滑块的结果。
+	newCookies, captchaEngine, err := a.solveTokenCaptcha(
+		ctx, cookieID, cookieStr, verificationURL, deviceID, captchaHeadless,
+	)
 	if err != nil {
 		// manualURL 用于本次流程后续判断的manualURL
 		manualURL := browser.TokenCaptchaManualVerificationURL(err)
@@ -241,15 +179,10 @@ func (a *Adapter) OnTokenCaptchaVerification(ctx context.Context, cookieID, cook
 			manualURL = verificationURL
 		}
 		a.logger.Warn("token 风控滑块处理失败", "account", cookieID, "err", logsafe.Error(err), "verification_url", logsafe.URL(manualURL))
-		if a.store != nil && a.store.RiskLogs != nil {
-			_ = a.store.RiskLogs.Update(ctx, logID, db.RiskControlLog{
-				ProcessingStatus: "failed",
-				ProcessingResult: fmt.Sprintf("token 风控滑块处理失败，耗时: %.2f秒", time.Since(start).Seconds()),
-				CaptchaEngine:    captchaEngine,
-				ErrorMessage:     err.Error(),
-				DurationMS:       time.Since(start).Milliseconds(),
-			})
-		}
+		a.updateTokenCaptchaRiskLog(ctx, logID, start, captchaEngine, db.RiskControlLog{
+			ProcessingStatus: "failed",
+			ErrorMessage:     err.Error(),
+		}, fmt.Sprintf("token 风控滑块处理失败，耗时: %.2f秒", time.Since(start).Seconds()))
 		a.OnAccountEvent(ctx, cookieID, engine.EventSecurityVerification, engine.AlertLevelWarn,
 			"token 风控验证失败", err.Error())
 		return nil, false
@@ -264,72 +197,19 @@ func (a *Adapter) OnTokenCaptchaVerification(ctx context.Context, cookieID, cook
 			"account", cookieID, "err", logsafe.Error(guardErr))
 		return nil, false
 	}
-	// cookieSnapshot 用于本次流程后续判断的登录凭证Snapshot
-	var cookieSnapshot []cookierefresh.BrowserCookie
-	// snapshotComplete 用于本次流程后续判断的snapshotComplete
-	snapshotComplete := false
-	if !remoteHandled {
-		if // reader、ok 用于本次流程后续判断的reader、ok
-		reader, ok := a.browser.(browserTokenCaptchaSnapshotReader); ok {
-			// profileCookies、profileSnapshot、readErr 用于本次流程后续判断的profileCookies、profileSnapshot、readErr
-			profileCookies, profileSnapshot, readErr := reader.TokenCaptchaCookieSnapshot(ctx, cookieID, captchaHeadless)
-			if readErr != nil {
-				a.logger.Warn("读取滑块验证后完整 Cookie Jar 失败，回退 Go 快照合并", "account", cookieID, "err", readErr)
-			} else {
-				cookieSnapshot = cookierefresh.NormalizeSnapshot(profileSnapshot)
-				if cookieSnapshot == nil {
-					cookieSnapshot = []cookierefresh.BrowserCookie{}
-				}
-				snapshotComplete = true
-				newCookies = profileCookies
-			}
-		}
-	}
-	if !snapshotComplete {
-		if // existing、complete 用于本次流程后续判断的existing、complete
-		existing, complete := cookierefresh.SnapshotFromMetadataOK(metadataJSON); complete {
-			cookieSnapshot = cookierefresh.ReconcileSnapshotWithCookieString(existing, newCookies)
-			snapshotComplete = true
-		}
-	}
-	// updatedMetadata 用于本次流程后续判断的updatedMetadata
-	updatedMetadata := cookierefresh.MetadataWithoutSnapshot(metadataJSON)
-	if snapshotComplete {
-		updatedMetadata = cookierefresh.MetadataWithSnapshot(metadataJSON, cookieSnapshot)
-	}
-	if // err 用于本次流程后续判断的err
-	err := a.store.Cookies.UpdateRenewalCookie(ctx, cookieID, newCookies, updatedMetadata, time.Now().Unix()); err != nil {
-		a.logger.Warn("保存 token 风控恢复 Cookie 失败", "account", cookieID, "err", err)
-		if a.store != nil && a.store.RiskLogs != nil {
-			_ = a.store.RiskLogs.Update(ctx, logID, db.RiskControlLog{
-				ProcessingStatus: "error",
-				ProcessingResult: "滑块完成但保存 Cookie 失败",
-				CaptchaEngine:    captchaEngine,
-				ErrorMessage:     err.Error(),
-				DurationMS:       time.Since(start).Milliseconds(),
-			})
-		}
-		return nil, false
-	}
-	if a.store.Tokens != nil {
-		_ = a.store.Tokens.Clear(ctx, cookieID)
-	}
-	if a.store != nil && a.store.RiskLogs != nil {
-		_ = a.store.RiskLogs.Update(ctx, logID, db.RiskControlLog{
-			ProcessingStatus: "success",
-			ProcessingResult: fmt.Sprintf("token 风控滑块验证成功（%s），已更新登录凭证，耗时: %.2f秒", captchaEngine, time.Since(start).Seconds()),
-			CaptchaEngine:    captchaEngine,
-			DurationMS:       time.Since(start).Milliseconds(),
-		})
-	}
-	a.OnAccountEvent(ctx, cookieID, engine.EventSecurityVerification, engine.AlertLevelInfo,
-		"token 风控验证已自动恢复", "系统已完成验证并更新登录凭证。")
-	return &mtop.RefreshResult{
-		UpdatedCookies:         newCookies,
-		CookieSnapshot:         cookieSnapshot,
-		CookieSnapshotComplete: snapshotComplete,
-		CookieStateChanged:     newCookies != cookieStr || snapshotComplete,
-	}, true
+	// remoteHandled 表示滑块是否由远程服务处理，决定能否读取浏览器 Cookie Jar。
+	remoteHandled := captchaEngine == "remote"
+	return a.persistTokenCaptchaResult(ctx, tokenCaptchaPersistInput{
+		CookieID:      cookieID,
+		CookieStr:     cookieStr,
+		NewCookies:    newCookies,
+		MetadataJSON:  metadataJSON,
+		CaptchaEngine: captchaEngine,
+		Headless:      captchaHeadless,
+		RemoteHandled: remoteHandled,
+		Start:         start,
+		LogID:         logID,
+	})
 }
 
 // HandleSystemEvent 把系统卡片事件转发到自动化中心，由自动化规则决定是否执行。
