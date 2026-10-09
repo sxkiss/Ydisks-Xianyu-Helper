@@ -54,4 +54,6 @@
 *.bak
 
 # Docker 构建期运行时缓存（含 Chromium 等大体积二进制，不入库）
-/.docker/
+/.docker/*
+# apt 源是纯文本配置（约 313 字节），Dockerfile 构建期需要它，必须入库
+!/.docker/apt-sources/
