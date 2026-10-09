@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - dev
+      - sxkiss-local
   workflow_dispatch:
   workflow_call:
     inputs:
@@ -296,6 +297,7 @@ jobs:
             type=sha,format=long
             type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
             type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
+            type=raw,value=sxkiss-local,enable=${{ github.ref == 'refs/heads/sxkiss-local' }}
 
       - name: 创建并推送多架构 manifest
         shell: bash
