@@ -143,8 +143,8 @@ func (a *AIReplierImpl) Reply(ctx context.Context, m ChatMessage) (*ReplyResult,
 	if len(resp.Choices) == 0 {
 		return nil, nil
 	}
-	// reply 用于本次流程后续判断的回复
-	reply, markerPrice, markerOK := extractExecutableOffer(strings.TrimSpace(resp.Choices[0].Message.Content))
+	// reply 用于本次流程后续判断的回复；报价标记取自原文，正文单独过滤。
+	reply, markerPrice, markerOK := executableAIOffer(resp.Choices[0].Message.Content)
 	if reply == "" {
 		return nil, nil
 	}
@@ -281,7 +281,7 @@ func (a *AIReplierImpl) replyGeneral(ctx context.Context, cfg *db.AIReplySetting
 		return nil, nil
 	}
 	// 通用路径同样剥离可执行报价标记，确保不会进入自动改价链路。
-	reply, _, _ := extractExecutableOffer(strings.TrimSpace(resp.Choices[0].Message.Content))
+	reply, _, _ := executableAIOffer(resp.Choices[0].Message.Content)
 	if reply == "" {
 		return nil, nil
 	}
@@ -437,21 +437,85 @@ var executableOfferRe = regexp.MustCompile(`\[\[AUTO_PRICE:(\d+(?:\.\d{1,2})?)\]
 // internalOfferMarkerRe 匹配任意格式的内部报价标记，确保模型格式错误时也不会泄露给买家。
 var internalOfferMarkerRe = regexp.MustCompile(`\[\[AUTO_PRICE:[^\]]*\]\]`)
 
-// extractExecutableOffer 从模型输出移除内部报价标记，并返回可校验的十进制金额。
-func extractExecutableOffer(content string) (string, float64, bool) {
+// AI 输出安全过滤：思考块、思考标记与上游错误原文一律不得发给买家。
+var (
+	// aiThinkBlockRe 匹配完整或未闭合的思考块（<think>…</think> 等），发送前整体剥离。
+	aiThinkBlockRe = regexp.MustCompile(`(?s)<(?:think|thinking|reasoning)>\s*.*?(?:</(?:think|thinking|reasoning)>|\z)`)
+	// aiAnswerBlockRe 匹配 <answer>…</answer> 包裹的最终答案；存在时只保留答案部分。
+	aiAnswerBlockRe = regexp.MustCompile(`(?s)<answer>\s*(.*?)\s*</answer>`)
+	// aiThinkPrefixRe 剥离行首的思考标记前缀（如 "[思考]"），保留其后的正文供后续判定。
+	aiThinkPrefixRe = regexp.MustCompile(`(?im)^\s*\[(?:思考|thinking|reasoning)\]\s*`)
+	// aiErrorSelfRe 匹配把上游错误原文直接当作回复的高危形态，命中即整条丢弃。
+	aiErrorSelfRe = regexp.MustCompile(`(?i)^\s*(?:\[error\]|\[错误\]|error[\s:：]|API返回错误|API returned an error)`)
+	// aiReasoningLeakRe 匹配模型把内部决策自言明语发给买家的典型开头，命中即整条丢弃。
+	aiReasoningLeakRe = regexp.MustCompile(`\A(?:用户发来|用户发送了|买家发来|让我用[^，。\n]*技能|根据可用技能|我需要(?:查看|分析)这|让我先|我先)`)
+)
+
+// sanitizeAIContent 过滤模型输出中的思考块、思考标记和上游错误原文；
+// 返回空字符串表示该输出不适合发给买家，调用方应放弃本次回复。
+func sanitizeAIContent(content string) string {
+	// s 是逐步清洗后的候选回复。
+	s := strings.TrimSpace(content)
+	if s == "" {
+		return ""
+	}
+	// <answer> 包裹时只保留最终答案，丢弃块外思考。
+	if m := aiAnswerBlockRe.FindStringSubmatch(s); m != nil {
+		s = strings.TrimSpace(m[1])
+	}
+	s = aiThinkBlockRe.ReplaceAllString(s, "")
+	s = aiThinkPrefixRe.ReplaceAllString(s, "")
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	// 错误原文或内部自言自语直接判废，宁可不回也不能污染买家会话。
+	if aiErrorSelfRe.MatchString(s) || aiReasoningLeakRe.MatchString(s) {
+		return ""
+	}
+	return s
+}
+
+// rawExecutableOfferPrice 从原始模型输出解析内部报价标记。
+// 必须在未经安全过滤的原文上提取：过滤会连同报价标记一起删除，导致该改价的没改价。
+func rawExecutableOfferPrice(content string) (float64, bool) {
 	// matches 是模型输出中所有结构化报价标记；只有恰好一个标记才可执行。
 	matches := executableOfferRe.FindAllStringSubmatch(content, -1)
-	// visible 是删除所有内部标记后真正发送给买家的文本。
-	visible := strings.TrimSpace(internalOfferMarkerRe.ReplaceAllString(content, ""))
 	if len(matches) != 1 {
-		return visible, 0, false
+		return 0, false
 	}
 	// price 是标记中的元金额；err 表示模型输出无法解析为有限十进制数。
 	price, err := strconv.ParseFloat(matches[0][1], 64)
 	if err != nil || math.IsNaN(price) || math.IsInf(price, 0) {
-		return visible, 0, false
+		return 0, false
 	}
-	return visible, price, true
+	return price, true
+}
+
+// executableAIOffer 是模型输出进入回复链路的统一入口。
+// 报价标记取自原始输出以保证自动改价判定不被安全过滤误删；
+// 买家可见正文则单独做安全过滤，两者互不干扰。
+// visible 为空表示该输出不适合发给买家，调用方应放弃本次回复。
+func executableAIOffer(content string) (string, float64, bool) {
+	// price、ok 来自未清洗原文，保持与原版一致的报价语义。
+	price, ok := rawExecutableOfferPrice(content)
+	// visible 是清洗后准备发给买家的正文。
+	visible := sanitizeAIContent(content)
+	if visible == "" {
+		return "", 0, false
+	}
+	// 内部标记无论格式对错都必须从正文中剥离，买家不能看到。
+	visible = strings.TrimSpace(internalOfferMarkerRe.ReplaceAllString(visible, ""))
+	return visible, price, ok
+}
+
+// extractExecutableOffer 从模型输出移除内部报价标记，并返回可校验的十进制金额。
+func extractExecutableOffer(content string) (string, float64, bool) {
+	// price、ok 是模型输出中结构化报价的解析结果。
+	price, ok := rawExecutableOfferPrice(content)
+	// visible 是删除所有内部标记后真正发送给买家的文本。
+	visible := strings.TrimSpace(internalOfferMarkerRe.ReplaceAllString(content, ""))
+	return visible, price, ok
 }
 
 // priceToCents 把已经通过边界校验的元金额四舍五入为整数分。

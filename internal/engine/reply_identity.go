@@ -2,11 +2,16 @@ package engine
 
 import (
 	"context"
+	"regexp"
 	"strings"
 
 	"xianyu-go/internal/db"
 	"xianyu-go/internal/xianyu/protocol"
 )
+
+// aiPlatformNoticeRe 匹配平台合规系统通知：整条消息就是一个方括号提示且含合规关键词。
+// 只拦这类提示，避免误伤买家表情（[微笑]）、图片（[图片] url）与表情+文字消息。
+var aiPlatformNoticeRe = regexp.MustCompile(`^\[[^\[\]]*(?:请勿|禁止|违规|警告|脱离|引导买家|平台规则|风险提示|系统提示|注意)[^\[\]]*\]$`)
 
 // replyLocalItemOwnership 是生产适配器提供的本地商品归属核验能力。
 // 本地商品表是当前账号为卖家的确定证据；自动回复不再使用平台商品详情推断角色。
@@ -28,6 +33,13 @@ type replySessionRoleStore interface {
 func (d *messageDispatcher) canAutoReply(ctx context.Context, message ChatMessage) bool {
 	// 无商品 ID 的消息：若通用 AI 客服已启用则放行，交给 replyGeneral 处理纯聊天。
 	if strings.TrimSpace(message.ItemID) == "" {
+		// 过滤平台合规系统通知，避免自动回复机器人去"应答"平台提示。
+		// 只拦截整条即一个方括号提示、且含合规关键词的消息；
+		// 买家表情（[微笑]/[尴尬]）、图片（[图片] url）与表情+文字必须放行。
+		content := strings.TrimSpace(message.Text)
+		if aiPlatformNoticeRe.MatchString(content) {
+			return false
+		}
 		if d.reply != nil && d.reply.IsGeneralAIEnabled(ctx) {
 			return true
 		}

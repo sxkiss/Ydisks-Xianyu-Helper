@@ -49,5 +49,9 @@
 .idea/
 .vscode/
 
+# Manual backup files (keep out of Git; restore manually if needed)
+*.bak.*
+*.bak
+
 # Docker 构建期运行时缓存（含 Chromium 等大体积二进制，不入库）
 /.docker/
